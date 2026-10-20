@@ -35,7 +35,8 @@ class BridgeTest(unittest.TestCase):
         self.assertEqual([b["time"] for b in bars["result"]], [1_790_208_000, 1_790_208_900, 1_790_209_800])
         self.assertEqual(bars["result"][0]["volume"], 100.0)
         checks = {c["id"]: c["status"] for c in conn["result"]["checks"]}
-        self.assertEqual(checks, {"terminal": "ok", "algo": "warn", "trading": "ok", "symbol": "ok", "balance": "ok"})
+        self.assertEqual(checks, {"terminal": "ok", "algo": "warn", "trading": "ok", "symbol": "ok",
+                                  "clock": "ok", "balance": "ok"})
 
     def test_order_book_uses_terminal_dom_and_releases_subscription(self):
         released_before = fake._state["book_releases"]
@@ -122,6 +123,53 @@ class BridgeTest(unittest.TestCase):
             )
             self.assertTrue(snapshot["ok"], snapshot)
             self.assertLess(time.time_ns() // 1_000_000 - snapshot["result"]["quote"]["time_ms"], 30_000)
+            self.assertGreater(time.time_ns() // 1_000_000 - snapshot["result"]["quote"]["time_ms"], 10_000)
+        finally:
+            fake._state["quote_age_seconds"] = 0
+
+    def test_broker_server_time_is_normalized_to_the_computer_clock(self):
+        # RoboForex runs on EET: quote and bar timestamps arrive three hours ahead of UTC,
+        # which the app rejected as "more than 2 seconds in the future".
+        saved = fake.SERVER_OFFSET
+        fake.SERVER_OFFSET = 3 * 3600
+        try:
+            conn, bars, snapshot = run(
+                {"id": 1, "cmd": "connect", "login": 1, "password": "good", "server": "RoboForex-ECN"},
+                {"id": 2, "cmd": "candles", "timeframe": "15m", "limit": 3},
+                {"id": 3, "cmd": "market_snapshot"},
+            )
+            self.assertEqual(conn["result"]["server_offset"], 3 * 3600)
+            self.assertEqual([b["time"] for b in bars["result"]],
+                             [1_790_208_000, 1_790_208_900, 1_790_209_800])
+            age_ms = time.time_ns() // 1_000_000 - snapshot["result"]["quote"]["time_ms"]
+            self.assertLess(abs(age_ms), 5_000, "a normalized quote is neither future nor stale")
+        finally:
+            fake.SERVER_OFFSET = saved
+
+    def test_small_clock_skew_is_absorbed(self):
+        # A computer clock a few seconds behind puts a live quote slightly ahead.
+        saved = fake.SERVER_OFFSET
+        fake.SERVER_OFFSET = 3
+        try:
+            conn, snapshot = run(
+                {"id": 1, "cmd": "connect", "login": 1, "password": "good", "server": "RoboForex-ECN"},
+                {"id": 2, "cmd": "market_snapshot"},
+            )
+            self.assertEqual(conn["result"]["server_offset"], 3)
+            age_ms = time.time_ns() // 1_000_000 - snapshot["result"]["quote"]["time_ms"]
+            self.assertLess(abs(age_ms), 5_000)
+        finally:
+            fake.SERVER_OFFSET = saved
+
+    def test_stale_tick_never_becomes_a_clock_offset(self):
+        # Twenty seconds behind is a stale quote, not a timezone: it must stay stale.
+        fake._state["quote_age_seconds"] = 20
+        try:
+            conn, snapshot = run(
+                {"id": 1, "cmd": "connect", "login": 1, "password": "good", "server": "RoboForex-ECN"},
+                {"id": 2, "cmd": "market_snapshot"},
+            )
+            self.assertEqual(conn["result"]["server_offset"], 0)
             self.assertGreater(time.time_ns() // 1_000_000 - snapshot["result"]["quote"]["time_ms"], 10_000)
         finally:
             fake._state["quote_age_seconds"] = 0
