@@ -37,6 +37,13 @@ MAX_TICKS = 256
 MAGIC = 26070552
 TRADE_SYMBOL = "XAUUSD"
 
+# Broker clock correction. An actively traded XAUUSD quote is under a second old, so its
+# timestamp minus local time IS the clock offset. A stale tick never produces an offset:
+# the honest failure for it is "stale", not a fabricated timezone shift.
+MAX_CLOCK_OFFSET_S = 14 * 3600
+CLOCK_SNAP_S = 900      # broker time zones are whole or half hours
+CLOCK_RESIDUAL_S = 5    # what remains after snapping is transmission delay
+
 
 class BridgeError(Exception):
     pass
@@ -131,6 +138,13 @@ class Bridge:
         sym = mt5.symbol_info(self.symbol)
         spread = f" · spread {sym.spread} points" if sym is not None and getattr(sym, "spread", None) else ""
         add("symbol", "Gold symbol", "ok", f"{self.symbol}{spread}")
+        if self.offset:
+            hours, minutes = divmod(abs(self.offset) // 60, 60)
+            sign = "+" if self.offset > 0 else "-"
+            add("clock", "Broker clock", "ok",
+                f"server time {sign}{hours}h {minutes:02d}m, normalized to the computer clock")
+        else:
+            add("clock", "Broker clock", "ok", "matches the computer clock")
         if info is not None:
             status = "ok" if info.balance > 0 else "warn"
             add("balance", "Balance", status, f"{info.currency} {info.balance:.2f}")
@@ -144,9 +158,37 @@ class Bridge:
                 return name
         raise BridgeError("this MT5 account has no XAUUSD symbol")
 
-    def _server_offset(self, mt5):
-        # The Python MT5 API returns UTC. Never infer an offset from stale ticks.
-        return 0
+    def _server_offset(self, mt5, symbol=None):
+        """Seconds the broker clock is ahead of the local clock; 0 when they agree.
+
+        The MT5 Python package does not guarantee UTC: brokers running on EET (UTC+2/+3)
+        return server time, which the app sees as a quote hours in the future. A computer
+        clock that drifted a few seconds produces the same symptom. Both are measured
+        here, and a stale tick is refused instead of being turned into an offset.
+        """
+        name = symbol or self.symbol
+        if not name:
+            return 0
+        tick = mt5.symbol_info_tick(name)
+        if tick is None:
+            return 0
+        stamp_ms = getattr(tick, "time_msc", 0) or int(getattr(tick, "time", 0) or 0) * 1000
+        if not stamp_ms:
+            return 0
+        delta = stamp_ms / 1000.0 - time.time()
+        if abs(delta) <= 2.0:
+            return 0                                   # clocks already agree
+        # Only a quote that looks AHEAD is a clock problem. A quote behind is a stale
+        # tick, and rewriting it as "now" would hide exactly what the caller must see.
+        if delta <= 0:
+            return 0
+        if delta <= 60.0:
+            return int(round(delta))                   # small skew of a live tick
+        if delta <= MAX_CLOCK_OFFSET_S:
+            snapped = round(delta / CLOCK_SNAP_S) * CLOCK_SNAP_S
+            if abs(delta - snapped) <= CLOCK_RESIDUAL_S:
+                return int(snapped)                    # timezone-shaped difference
+        return 0                                       # implausible: do not guess
 
     def candles(self, req):
         if not self.symbol:
@@ -264,7 +306,7 @@ class Bridge:
             try:
                 data = row if isinstance(row, dict) else dict(zip(row.dtype.names, row))
                 stamp = data.get("time_msc") or int(data.get("time", 0)) * 1000
-                stamp = int(stamp)
+                stamp = int(stamp) - self.offset * 1000
                 bid, ask = float(data["bid"]), float(data["ask"])
                 last = float(data.get("last", 0)) or None
                 volume = float(data.get("volume_real", data.get("volume", 0)))
@@ -298,6 +340,8 @@ class Bridge:
         if terminal is None or not terminal.connected:
             raise BridgeError("MT5 terminal is disconnected")
 
+        if not self.offset:
+            self.offset = self._server_offset(mt5)
         tick = mt5.symbol_info_tick(self.symbol)
         if tick is None:
             code, message = mt5.last_error()
