@@ -150,10 +150,15 @@ jobs:
         with:
           targets: ${{ matrix.targets }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --locked
+      # The workspace test spawns the Python mock venue (scripts/mock_venues.py), so the
+      # interpreter has to exist before `cargo test` runs. On Windows `python3` without an
+      # installed interpreter resolves to the Microsoft Store alias and the step hangs.
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - run: cargo test --workspace --locked
+        env:
+          AEGIS_TEST_PYTHON: python
       - name: Python bridge tests (optional research extras may skip)
         run: python -m unittest discover -s tests -v
         working-directory: python
