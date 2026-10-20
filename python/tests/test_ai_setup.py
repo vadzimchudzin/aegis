@@ -36,7 +36,13 @@ def make_tar(entries):
     return stream
 
 
+# ai_setup refuses to run outside Linux x86_64 (_supported_platform), and the cases below
+# assert POSIX permission bits and symlink behaviour that Windows does not provide.
+LINUX_ONLY = unittest.skipUnless(sys.platform.startswith("linux"), "POSIX-only AI runtime setup behaviour")
+
+
 class SafeExtractionTests(unittest.TestCase):
+    @LINUX_ONLY
     def test_extracts_regular_executable_and_directory(self):
         stream = make_tar([
             ("bin", "directory", b""),
@@ -63,6 +69,7 @@ class SafeExtractionTests(unittest.TestCase):
             with self.assertRaises(ai_setup.SetupError):
                 ai_setup.safe_extract(stream, Path(tmp) / "stage")
 
+    @LINUX_ONLY
     def test_extracts_internal_symlinks_after_regular_files(self):
         stream = make_tar([
             ("lib/ollama/libx.so", "symlink", "libx.so.0"),
@@ -95,6 +102,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(env["OLLAMA_MODELS"], str((Path(tmp) / "ai-runtime" / "models").resolve()))
         self.assertEqual(env["OLLAMA_NO_CLOUD"], "1")
 
+    @LINUX_ONLY
     def test_setup_rejects_model_directory_symlink(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "ai-runtime"
@@ -179,6 +187,7 @@ class RuntimeTests(unittest.TestCase):
                         ai_setup._download("https://github.com/example/archive", destination, len(payload), "sha256:" + "0" * 64)
             self.assertFalse(destination.exists())
 
+    @LINUX_ONLY
     def test_preinstalled_ollama_is_exposed_at_primary_runtime_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             system_binary = Path(tmp) / "system-ollama"
@@ -191,6 +200,7 @@ class RuntimeTests(unittest.TestCase):
             self.assertTrue(Path(binary).is_symlink())
             self.assertEqual(Path(binary).resolve(), system_binary.resolve())
 
+    @LINUX_ONLY
     def test_install_runtime_extracts_into_a_new_stage_and_cleans_it(self):
         archive_stream = make_tar([("bin/ollama", "file", b"ollama binary")])
         with tempfile.TemporaryDirectory() as tmp:
