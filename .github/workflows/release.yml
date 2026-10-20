@@ -205,10 +205,21 @@ jobs:
           script: |
             const { owner, repo } = context.repo;
             const tag = process.env.RELEASE_TAG;
-            const { data: release } = await github.rest.repos.getReleaseByTag({ owner, repo, tag });
-            if (!release.draft) throw new Error(`Release ${tag} is not a draft; refusing to republish`);
-            const { data: commit } = await github.rest.repos.getCommit({ owner, repo, ref: tag });
-            if (commit.sha !== context.sha) throw new Error(`Tag ${tag} does not point to the tested checkout`);
+            // A draft release has no git tag yet: GitHub creates the tag only when the draft is
+            // published, and getReleaseByTag() cannot see drafts at all. Looking the release up
+            // by tag therefore returned 404 on our own draft, so nothing could ever be published.
+            // Find the draft by listing releases and bind the tested commit via target_commitish.
+            const { data: releases } = await github.paginate(github.rest.repos.listReleases, { owner, repo, per_page: 100 });
+            const release = releases.find(candidate => candidate.tag_name === tag);
+            if (!release) throw new Error(`No release entry for ${tag}; the build matrix uploaded nothing`);
+            if (!release.draft) throw new Error(`Release ${tag} is already published; refusing asset re-upload`);
+            const target = String(release.target_commitish || '').toLowerCase();
+            if (target !== context.sha.toLowerCase()) {
+              const { data: commit } = await github.rest.repos.getCommit({ owner, repo, ref: release.target_commitish });
+              if (commit.sha.toLowerCase() !== context.sha.toLowerCase()) {
+                throw new Error(`Draft ${tag} targets ${release.target_commitish}, not the tested ${context.sha}`);
+              }
+            }
             const assets = await github.paginate(github.rest.repos.listReleaseAssets, { owner, repo, release_id: release.id, per_page: 100 });
             for (const extension of ['.exe', '.deb', '.dmg']) {
               if (!assets.some(asset => asset.name.toLowerCase().endsWith(extension) && asset.size > 0 && asset.state === 'uploaded')) {

@@ -51,6 +51,7 @@ The macOS bundle uses the existing ad-hoc signing setting; notarization is not c
 All three platform test jobs must pass before packaging starts. Each packaging job reruns
 Rust, Python and Node tests before the Tauri action. All three Tauri jobs upload to the same
 draft release. Only a final job depending on the entire successful build matrix may publish:
-it checks that the tag matches the tested checkout and nonempty, uploaded `.exe`, `.deb`,
-and `.dmg` assets exist, then publishes beta.6 with `prerelease: true`. A failed matrix or
-missing asset leaves the release draft; there is no publicly partial installer release.
+it finds the draft by listing releases (a draft has no git tag yet), checks that the draft
+targets the tested commit and that nonempty, uploaded `.exe`, `.deb`, and `.dmg` assets
+exist, then publishes beta.6 with `prerelease: true`. A failed matrix or missing asset leaves
+the release draft; there is no publicly partial installer release.
