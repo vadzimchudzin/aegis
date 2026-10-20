@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.7.0-beta.6 — MT5 broker clock normalization
+
+- Paper start no longer fails with `quote timestamp is more than 2 seconds in the future`
+  on brokers whose server runs ahead of UTC. The bridge measured no offset at all while
+  subtracting one from every timestamp, so a RoboForex (EET, UTC+2/+3) quote looked three
+  hours in the future.
+- The offset is measured from a live tick (small skew, or a whole/half-hour timezone
+  difference). A stale tick never becomes an offset, so a closed market still reports
+  `stale` instead of a fabricated correction.
+- `history_ticks()` now subtracts the offset as well; previously a shifted server clock put
+  every row outside the requested UTC slice and the reply was empty.
+- The connect checklist reports the correction as a `clock` entry. The 2 s future and 10 s
+  stale thresholds are unchanged.
+- Fixture-only verification; live RoboForex acceptance remains outstanding. See
+  `docs/release-beta6.md`.
+
 ## 0.7.0-beta.5 — Audit and Paper telemetry prerelease
 
 - Audited local AI startup/recovery and bounded decision reliability fixes.
