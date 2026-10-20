@@ -410,12 +410,22 @@ mod tests {
         local_ai::Runtime,
         observer::{self, SimState},
     };
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    /// Per-test directories must be unique inside one process. The stamps below are derived
+    /// from `now()` with small offsets (+1, +2, ...), so two tests can read clocks one
+    /// millisecond apart and land on the same name, sharing and then deleting each other's
+    /// journal. A counter removes that race without depending on timing.
+    static TEMP_ID: AtomicU64 = AtomicU64::new(0);
     fn now() -> u64 {
         SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64
     }
     fn setup(stamp: u64) -> (PathBuf, EventCycle, ObserverConfig) {
-        let path = std::env::temp_dir().join(format!("aegis-cycle-{}-{stamp}", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "aegis-cycle-{}-{}-{stamp}",
+            std::process::id(),
+            TEMP_ID.fetch_add(1, Ordering::Relaxed)
+        ));
         let _ = std::fs::remove_dir_all(&path);
         let config = ObserverConfig {
             event_paper_enabled: true,
@@ -440,6 +450,21 @@ mod tests {
                 .unwrap();
         }
         (path, cycle, config)
+    }
+    #[test]
+    fn setup_directories_stay_unique_for_the_same_stamp() {
+        // Regression: the directory used to be keyed by process id and a `now()`-derived
+        // stamp only, so two tests that read clocks one millisecond apart shared a
+        // directory, wiped each other's journal and failed intermittently in parallel runs.
+        let stamp = now();
+        let (first, _cycle, _config) = setup(stamp);
+        let (second, _cycle, _config) = setup(stamp);
+        assert_ne!(
+            first, second,
+            "two tests with the same stamp must not share a directory"
+        );
+        std::fs::remove_dir_all(&first).ok();
+        std::fs::remove_dir_all(&second).ok();
     }
     fn score(context: &scoring::ScoringContext, value: f64) -> String {
         json!({"score":value,"rationale":"fixture sampled evidence, not probability","forecast_horizon":{"kind":"unknown"},"window":context.window,"event_id":context.event_id,"snapshot_id":context.snapshot_id,"source":context.source,"snapshot_time_unix_ms":context.snapshot_time_unix_ms}).to_string()
