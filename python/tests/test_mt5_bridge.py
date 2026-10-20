@@ -1,3 +1,4 @@
+import importlib.util
 import io
 import json
 import os
@@ -12,6 +13,27 @@ import MetaTrader5 as fake  # noqa: E402
 
 from aegis_lab.bridges.mt5_bridge import Bridge, serve  # noqa: E402
 
+def _real_mt5_installed():
+    """True when a MetaTrader5 package exists outside the test fixture.
+
+    Two cases below simulate a machine without the package. Purging the fixture from
+    sys.modules lets the path finder answer honestly, so a developer machine that really
+    has MetaTrader5 skips them instead of failing.
+    """
+    fake_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "fake_mt5"))
+    saved_path = list(sys.path)
+    saved_module = sys.modules.pop("MetaTrader5", None)
+    try:
+        sys.path[:] = [p for p in sys.path if os.path.abspath(p or ".") != fake_dir]
+        importlib.invalidate_caches()
+        return importlib.util.find_spec("MetaTrader5") is not None
+    finally:
+        sys.path[:] = saved_path
+        if saved_module is not None:
+            sys.modules["MetaTrader5"] = saved_module
+
+
+NO_REAL_MT5 = unittest.skipIf(_real_mt5_installed(), "the real MetaTrader5 package is installed")
 
 def run(*requests):
     out = io.StringIO()
@@ -278,6 +300,7 @@ class BridgeTest(unittest.TestCase):
         self.assertTrue(replies[-1]["ok"])
         self.assertEqual(replies[-1]["id"], 9)
 
+    @NO_REAL_MT5
     def test_hello_reports_a_missing_package(self):
         bridge = Bridge()
         saved = sys.modules.pop("MetaTrader5", None)
@@ -291,6 +314,7 @@ class BridgeTest(unittest.TestCase):
             if saved is not None:
                 sys.modules["MetaTrader5"] = saved
 
+    @NO_REAL_MT5
     def test_missing_package_is_explained(self):
         bridge = Bridge()
         saved = sys.modules.pop("MetaTrader5", None)
