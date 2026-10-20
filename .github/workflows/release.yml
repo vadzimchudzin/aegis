@@ -209,7 +209,7 @@ jobs:
             // published, and getReleaseByTag() cannot see drafts at all. Looking the release up
             // by tag therefore returned 404 on our own draft, so nothing could ever be published.
             // Find the draft by listing releases and bind the tested commit via target_commitish.
-            const { data: releases } = await github.paginate(github.rest.repos.listReleases, { owner, repo, per_page: 100 });
+            const releases = await github.paginate(github.rest.repos.listReleases, { owner, repo, per_page: 100 });
             const release = releases.find(candidate => candidate.tag_name === tag);
             if (!release) throw new Error(`No release entry for ${tag}; the build matrix uploaded nothing`);
             if (!release.draft) throw new Error(`Release ${tag} is already published; refusing asset re-upload`);
