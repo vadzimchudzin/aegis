@@ -34,9 +34,11 @@ Paper is the default; Money remains off unless explicitly armed for the current 
 - **No live broker acceptance was performed for this fix.** The measurement logic is covered
   by fixtures only. Confirming that Paper starts against a real RoboForex terminal, and that
   the `clock` entry reports the expected correction, remains a separate check on Windows.
-- `event_cycle::tests::score_eight_and_truncated_completion_never_admitted` is flaky under
-  the parallel full-suite run (passes in isolation and with `--test-threads=1`). This is
-  unrelated to the clock change and is not fixed here.
+- `event_cycle` test isolation is fixed: per-test temporary directories were keyed by process
+  id and a `now()`-derived stamp, so two tests reading clocks a millisecond apart shared a
+  directory, deleted each other's journal and failed intermittently in the parallel full-suite
+  run. A per-process counter makes the name unique, with a regression test asserting that two
+  setups with the same stamp get different directories. Eight consecutive full-suite runs pass.
 - The published beta.5 installers contain the old code: checking updated sources does not
   upgrade an existing installation. Only verified beta.6 assets contain these changes.
 
