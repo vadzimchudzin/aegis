@@ -44,6 +44,7 @@ async fn connects_with_terminal_checklist_and_utc_candles() {
             ("algo", Warn), // fake terminal has Algo Trading off
             ("trading", Ok),
             ("symbol", Ok),
+            ("clock", Ok), // the bridge reports the measured broker clock correction
             ("balance", Ok)
         ]
     );
