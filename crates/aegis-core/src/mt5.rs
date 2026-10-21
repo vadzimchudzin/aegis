@@ -198,16 +198,31 @@ impl Mt5Bridge {
     }
 
     pub(crate) async fn market_sample(&self) -> Result<MarketSample, BrokerError> {
-        let result = self.request(json!({"cmd": "market_snapshot"}), REQUEST_TIMEOUT).await?;
-        let sample: MarketSample =
-            serde_json::from_value(result).map_err(|e| BrokerError::Parse(format!("MT5 market snapshot: {e}")))?;
-        if sample.symbol != self.raw_symbol {
-            return Err(BrokerError::Parse("Market snapshot symbol changed".into()));
+        // A quiet market can go longer than the staleness budget without a tick, and the next
+        // tick a second later satisfies the same check. Retry a stale snapshot instead of
+        // failing at once; every other validation error still fails immediately.
+        const ATTEMPTS: usize = 3;
+        let mut last_stale = None;
+        for attempt in 0..ATTEMPTS {
+            let result = self.request(json!({"cmd": "market_snapshot"}), REQUEST_TIMEOUT).await?;
+            let sample: MarketSample =
+                serde_json::from_value(result).map_err(|e| BrokerError::Parse(format!("MT5 market snapshot: {e}")))?;
+            if sample.symbol != self.raw_symbol {
+                return Err(BrokerError::Parse("Market snapshot symbol changed".into()));
+            }
+            match sample.validate(crate::sign::now_ms().max(0) as u64) {
+                Ok(()) => return Ok(sample),
+                Err(message) if message.contains("stale") && attempt + 1 < ATTEMPTS => {
+                    last_stale = Some(message);
+                    tokio::time::sleep(Duration::from_millis(700)).await;
+                }
+                Err(message) => return Err(BrokerError::Parse(format!("MT5 market snapshot: {message}"))),
+            }
         }
-        sample
-            .validate(crate::sign::now_ms().max(0) as u64)
-            .map_err(|e| BrokerError::Parse(format!("MT5 market snapshot: {e}")))?;
-        Ok(sample)
+        Err(BrokerError::Parse(format!(
+            "MT5 market snapshot: {}",
+            last_stale.unwrap_or_else(|| "the quote did not refresh".into())
+        )))
     }
 
     pub(crate) async fn history_ticks(
