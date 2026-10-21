@@ -7,7 +7,7 @@ Experimental prerelease. Not acceptance for real-money trading. Paper remains th
 - Bounce screener keeps all expected-entry lines but labels at most four nearby levels, separated by at least 36 screen pixels. Hidden axis labels have no long title covering candles.
 - Responses from superseded chart/timeframe requests or slower overlapping refreshes no longer overwrite the current chart. Failed refreshes remove obsolete overlays.
 - Archive fallback is no longer rendered as live expected entries. Invalid entry prices/probabilities are discarded.
-- Weekend gaps are accepted only when every skipped bar is a UTC weekend slot. Missing Monday or Friday bars are still rejected.
+- Weekend gaps are accepted only when every skipped bar is a UTC weekend slot. Missing Monday or Friday bars are still rejected, including a missing Friday D1 bar at the exact Monday reopen boundary.
 - Closed-candle freshness discounts bounded weekend closures at Monday reopen. Quote freshness thresholds are unchanged; broker-specific holidays are not guessed.
 - Local-model restart failures are preserved rather than discarded. After restart, stopped/superseded sessions cannot submit another prompt; retry inference remains cancellable. An expired snapshot is not replayed after warmup, and its strategy key is released for the next market notification.
 - Release builds retain beta.7's successful OS-specific Python interpreter fix.

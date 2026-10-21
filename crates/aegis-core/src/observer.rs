@@ -367,7 +367,10 @@ fn closed_history_fresh(closed_at_ms: u64, now_ms: u64, period: u64) -> bool {
         }
         cursor = end;
     }
-    open_ms <= period + MAX_SAMPLE_AGE_MS
+    // Across a closure, a full open period means a newer bar has already closed.
+    // Do not carry the ordinary delivery grace across an entire weekend: it would
+    // admit a missing Friday D1 candle at exactly Monday midnight.
+    open_ms < period
 }
 
 /// Summarize only bars that have closed by `now_ms`; future and forming bars
@@ -2125,6 +2128,10 @@ pub(crate) mod tests {
             86_400_000
         ));
         assert!(!closed_history_fresh(monday + 1, monday, 86_400_000));
+        for delay in [0, 1, 30_000, 60_000] {
+            assert!(!closed_history_fresh(friday, monday + delay, 86_400_000));
+        }
+        assert!(closed_history_fresh(daily_close, monday + 86_400_000 - 1, 86_400_000));
         let bars = weekday_daily_bars(21, friday as i64 / 1000 - 28 * 86_400);
         let frame = summarize(Timeframe::D1, &bars, monday + 60_000).unwrap();
         assert!(frame.validate_at(monday + 60_000).is_ok());
