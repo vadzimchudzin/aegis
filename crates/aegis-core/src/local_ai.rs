@@ -1026,7 +1026,7 @@ mod tests {
         let root = temp_dir("process-tree");
         fs::create_dir_all(&root).unwrap();
         let pidfile = root.join("runner.pid");
-        let script = "import os,signal,sys,time\npid=os.fork()\nif pid == 0:\n signal.signal(signal.SIGTERM,signal.SIG_IGN)\n open(sys.argv[1],'w').write(str(os.getpid()))\n while True: time.sleep(1)\nelse:\n while True: time.sleep(1)\n";
+        let script = "import os,signal,sys,time\npid=os.fork()\nif pid == 0:\n signal.signal(signal.SIGTERM,signal.SIG_IGN)\n with open(sys.argv[1]+'.tmp','w') as f: f.write(str(os.getpid()))\n os.replace(sys.argv[1]+'.tmp',sys.argv[1])\n while True: time.sleep(1)\nelse:\n while True: time.sleep(1)\n";
         let mut command = Command::new("python3");
         command
             .args(["-c", script])
@@ -1044,7 +1044,12 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        let runner = fs::read_to_string(&pidfile).unwrap();
+        let runner: u32 = fs::read_to_string(&pidfile)
+            .unwrap()
+            .trim()
+            .parse()
+            .expect("published runner PID");
+        assert!(runner > 0, "runner PID must be positive");
         stop_process(child).await.unwrap();
         let mut stopped = false;
         for _ in 0..100 {

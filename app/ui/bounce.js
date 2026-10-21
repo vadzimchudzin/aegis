@@ -48,6 +48,7 @@
     progress: "",
     lines: [],
     liveTimer: null,
+    liveRequest: 0,
     live: null,
     selected: null,
     available: null,
@@ -782,8 +783,8 @@
     B.lines = [];
   }
 
-  function line(price, color, title, style = 0) {
-    B.lines.push(A.candles.createPriceLine({ price, color, lineWidth: 1, lineStyle: style, axisLabelVisible: true, title }));
+  function line(price, color, title, style = 0, axisLabelVisible = true) {
+    B.lines.push(A.candles.createPriceLine({ price, color, lineWidth: 1, lineStyle: style, axisLabelVisible, title: axisLabelVisible ? title : "" }));
   }
 
   function enterBacktestView(source, selected) {
@@ -875,19 +876,37 @@
 
   async function refreshLive() {
     if (!S.chart.broker || S.btView || !B.params) return;
+    const request = ++B.liveRequest;
+    const { broker, tf, generation } = S.chart;
+    const current = () => request === B.liveRequest && !S.btView && broker === S.chart.broker && tf === S.chart.tf && generation === S.chart.generation;
     try {
       const res = await invoke("bounce_live", { params: B.params });
-      if (S.btView || !S.chart.broker) return;
+      if (!current()) return;
       B.live = res;
       clearLines();
+      if (!res.fresh) {
+        log(`Bounce: ${res.note}`, "warn");
+        scheduleLive(LIVE_EVERY_MS);
+        return;
+      }
       // Levels come from Binance XAUUSDT; other venues quote gold with a basis, so their
       // lines are shifted by the current price difference.
       const chartLast = S.bars.length ? S.bars[S.bars.length - 1].close : NaN;
       const basis = S.chart.broker === "binance" || !Number.isFinite(chartLast) ? 0 : chartLast - res.live.price;
-      const ok = res.live.entries.filter((e) => e.ok);
+      const ok = res.live.entries.filter((e) => e.ok && Number.isFinite(e.entry) && Number.isFinite(e.prob));
+      // Keep every level, but label only nearby, vertically separated levels. Otherwise
+      // the price scale stacks dozens of long labels over the candles on small screens.
+      const labelled = new Set();
+      const labelY = [];
+      for (const e of [...ok].sort((a, b) => Math.abs(a.entry - res.live.price) - Math.abs(b.entry - res.live.price))) {
+        const y = A.candles.priceToCoordinate(e.entry + basis);
+        if (y === null || !Number.isFinite(y) || labelled.size >= 4 || labelY.some((other) => Math.abs(y - other) < 36)) continue;
+        labelled.add(e);
+        labelY.push(y);
+      }
       for (const e of ok) {
         const title = `${t("Bounce")} ${t(e.dir > 0 ? "buy" : "sell")} ${pct(e.prob, 0)}${basis ? ` (${t("basis")} ${basis >= 0 ? "+" : ""}${num(basis)})` : ""}`;
-        line(e.entry + basis, e.dir > 0 ? css("--mark-up") : css("--mark-down"), title, 1);
+        line(e.entry + basis, e.dir > 0 ? css("--mark-up") : css("--mark-down"), title, 1, labelled.has(e));
       }
       const best = Math.max(0, ...res.live.entries.map((e) => (Number.isFinite(e.prob) ? e.prob : 0)));
       const summary = t("Bounce: {n} expected entries on the chart · {m} armed levels near price, best {b} (threshold {th})", {
@@ -898,14 +917,16 @@
       });
       if (summary !== B.lastSummary) log(summary, ok.length ? "ok" : "");
       B.lastSummary = summary;
-      if (!res.fresh) log(`Bounce: ${res.note}`, "warn");
     } catch (e) {
+      if (!current()) return;
+      clearLines();
       log(`${t("Bounce expected entries")}: ${e}`, "bad");
     }
-    scheduleLive(LIVE_EVERY_MS);
+    if (current()) scheduleLive(LIVE_EVERY_MS);
   }
 
   function onLiveChart() {
+    ++B.liveRequest; // invalidate work started for the previous chart, even on the same broker
     clearLines();
     if (!B.info) ensureInfo().then(() => scheduleLive(0)).catch(() => {});
     else scheduleLive(0);

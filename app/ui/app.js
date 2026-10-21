@@ -405,7 +405,7 @@
   async function connectForm(id) {
     const card = document.querySelector(`.broker-card[data-broker="${id}"]`);
     const form = {};
-    card.querySelectorAll("input[data-key]").forEach((i) => (form[i.dataset.key] = i.value.trim()));
+    card.querySelectorAll("[data-key]").forEach((i) => (form[i.dataset.key] = i.value.trim()));
     const autoConnect = card.querySelector(".toggle").classList.contains("on");
     S.busy[id] = true;
     renderChartChrome();
@@ -520,10 +520,10 @@
     body.querySelectorAll(".broker-card").forEach((card) => {
       if (card.dataset.broker === submittedId) return;
       drafts.set(card.dataset.broker, {
-        values: [...card.querySelectorAll("input[data-key]")].map((input) => input.value),
+        values: [...card.querySelectorAll("[data-key]")].map((input) => input.value),
         auto: card.querySelector(".toggle").classList.contains("on"),
       });
-      if (card.contains(document.activeElement) && document.activeElement.matches("input[data-key]")) {
+      if (card.contains(document.activeElement) && document.activeElement.matches("[data-key]")) {
         focused = [card.dataset.broker, document.activeElement.dataset.key];
       }
     });
@@ -532,14 +532,14 @@
     body.querySelectorAll(".broker-card").forEach((card) => {
       const draft = drafts.get(card.dataset.broker);
       if (draft) {
-        card.querySelectorAll("input[data-key]").forEach((input, i) => (input.value = draft.values[i]));
+        card.querySelectorAll("[data-key]").forEach((input, i) => (input.value = draft.values[i]));
         card.querySelector(".toggle").classList.toggle("on", draft.auto);
       }
       bindCard(card);
     });
     body.scrollTop = scroll;
     if (focused) {
-      const input = [...body.querySelectorAll(".broker-card input[data-key]")].find(
+      const input = [...body.querySelectorAll(".broker-card [data-key]")].find(
         (node) => node.closest(".broker-card").dataset.broker === focused[0] && node.dataset.key === focused[1],
       );
       input?.focus({ preventScroll: true });
@@ -558,7 +558,15 @@
         const value = f.secret ? "" : saved.values[f.key] || "";
         const ph = stored ? t("Stored · leave empty to keep") : f.placeholder || "";
         const inputId = `broker-${id}-${f.key}`;
-        const input = `<input id="${esc(inputId)}" data-key="${esc(f.key)}" type="${f.secret ? "password" : "text"}" value="${esc(value)}" placeholder="${esc(ph)}" autocomplete="off" spellcheck="false" />`;
+        const offsetOptions = f.key === "server_offset_seconds" ? [
+          ["", t("Environment / UTC default (not auto-detected)")],
+          ...Array.from({ length: 29 }, (_, n) => n - 14).map((hour) => [String(hour * 3600), hour === 0 ? "UTC (+0)" : `UTC${hour > 0 ? "+" : ""}${hour}`]),
+        ] : null;
+        // Preserve arbitrary signed-second values saved by older/manual configuration.
+        if (offsetOptions && !offsetOptions.some(([v]) => v === value)) offsetOptions.push([value, `${value} s`]);
+        const input = offsetOptions
+          ? `<select id="${esc(inputId)}" data-key="${esc(f.key)}">${offsetOptions.map(([v, label]) => `<option value="${esc(v)}"${v === value ? " selected" : ""}>${esc(label)}</option>`).join("")}</select>`
+          : `<input id="${esc(inputId)}" data-key="${esc(f.key)}" type="${f.secret ? "password" : "text"}" value="${esc(value)}" placeholder="${esc(ph)}" autocomplete="off" spellcheck="false" />`;
         const row = i === 0 ? `<div class="api-row"><img class="api-mark" src="${esc(info.icon)}" alt="">${input}</div>` : input;
         return `<div class="field"><label for="${esc(inputId)}">${esc(t(f.label))}${f.optional ? ` (${esc(t("optional"))})` : ""}</label>${row}<p class="hint">${esc(t(f.hint))}</p></div>`;
       })

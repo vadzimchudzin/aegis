@@ -1070,13 +1070,38 @@ async fn decision_loop(app: AppHandle) {
                 }
             } => { continue; }
         };
-        // A model server can die mid-session (out of memory, crash). Restart it once and retry
-        // the same snapshot before giving up, so a single crash does not end the run and
-        // require a manual Start.
+        // Restart once on a refused connection. Startup owns process cleanup, so let it
+        // finish, but never submit an old session's prompt after Stop or Stop/Start.
         let response = match response {
-            Err(error) if error.contains("local model server is not running") && state.running() => {
-                let _ = crate::local_ai_cmd::local_ai_start(app.state::<LocalAiState>()).await;
-                local.observe(&prompt, &system).await
+            Err(error)
+                if error.contains("local model server is not running")
+                    && state.running()
+                    && epoch == state.epoch.load(Ordering::SeqCst) =>
+            {
+                let recovery = crate::local_ai_cmd::local_ai_start(app.state::<LocalAiState>()).await;
+                if !state.running() || epoch != state.epoch.load(Ordering::SeqCst) {
+                    continue;
+                }
+                match recovery {
+                    Err(recovery_error) => Err(format!("{error}; local model recovery failed: {recovery_error}")),
+                    Ok(_) => match snapshot.market.validate(now_ms()) {
+                        Err(stale) => {
+                            // Warmup may take longer than the quote budget. A new market
+                            // notification must be allowed to rebuild this strategy's input.
+                            last_keys.remove(&strategy.id);
+                            Err(format!("Local model recovered; waiting for a fresh snapshot: {stale}"))
+                        }
+                        Ok(()) => tokio::select! {
+                            answer = local.observe(&prompt, &system) => answer,
+                            _ = async {
+                                loop {
+                                    if !state.running() || epoch != state.epoch.load(Ordering::SeqCst) { break; }
+                                    if cancel.changed().await.is_err() { break; }
+                                }
+                            } => { continue; }
+                        },
+                    },
+                }
             }
             other => other,
         };

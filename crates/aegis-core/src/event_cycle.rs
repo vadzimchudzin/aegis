@@ -451,6 +451,40 @@ mod tests {
         }
         (path, cycle, config)
     }
+    // Durable Windows fixture seeding can take longer than the live quote budget.
+    // Add synthetic observations through the current fixture time only after setup;
+    // production timestamps and freshness checks are never changed.
+    fn refresh_live_fixture(cycle: &mut EventCycle, seeded_ms: u64) -> u64 {
+        let source = cycle.store.source().clone();
+        let end = (now() / 1000) as i64;
+        let start = (seeded_ms / 1000) as i64;
+        for at in (start + 30..end).step_by(30).chain(std::iter::once(end)) {
+            cycle
+                .sample(telemetry::Sample {
+                    source: source.clone(),
+                    at_utc: at,
+                    bid: 100.,
+                    ask: 100.1,
+                    dom: telemetry::Dom::Missing {
+                        reason: "fixture no DOM".into(),
+                    },
+                })
+                .unwrap();
+        }
+        now()
+    }
+
+    #[test]
+    fn slow_fixture_setup_does_not_expire_the_next_synthetic_quote() {
+        let seeded = now() - 60_000;
+        let (path, mut cycle, config) = setup(seeded);
+        let stamp = refresh_live_fixture(&mut cycle, seeded);
+        let (context, _) = cycle.candidate(&config, "density_bounce", 7, stamp, stamp).unwrap();
+        assert_eq!(context.max_source_age_ms, 10_000);
+        assert!(now().saturating_sub(context.snapshot_time_unix_ms) <= 10_000);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
     #[test]
     fn setup_directories_stay_unique_for_the_same_stamp() {
         // Regression: the directory used to be keyed by process id and a `now()`-derived
@@ -473,6 +507,7 @@ mod tests {
     async fn full_candidate_score_cloud_paper_outcome_restart_week_replay() {
         let stamp = now();
         let (path, mut cycle, config) = setup(stamp);
+        let stamp = refresh_live_fixture(&mut cycle, stamp);
         let (context, telemetry) = cycle.candidate(&config, "density_bounce", 7, stamp, stamp).unwrap();
         assert_eq!(telemetry["full_tick_history"], false);
         assert_ne!(context.source.source_id, "fixture-account");
@@ -543,6 +578,7 @@ mod tests {
     async fn score_eight_and_truncated_completion_never_admitted() {
         let stamp = now() + 1;
         let (path, mut cycle, config) = setup(stamp);
+        let stamp = refresh_live_fixture(&mut cycle, stamp);
         let (context, telemetry) = cycle.candidate(&config, "density_bounce", 7, stamp, stamp).unwrap();
         for reason in ["stop", "length"] {
             let(endpoint,worker)=reply(200,json!({"done":true,"done_reason":reason,"prompt_eval_count":100,"message":{"content":score(&context,8.)}}).to_string(),Duration::ZERO);
