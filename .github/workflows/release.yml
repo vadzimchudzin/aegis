@@ -179,7 +179,10 @@ jobs:
       # Windows needs `python` pinned: without it python3 resolves to the Microsoft
       # Store alias and the mock-venue test hangs. On Linux/macOS the hosted runners
       # expose python3 (and no plain `python`), so fall back to python3 there.
+      # Fail rather than leave a stalled test process holding publication indefinitely.
+      # This is a timeout, not a skip: every workspace test must still succeed.
       - run: cargo test --workspace --locked
+        timeout-minutes: 15
         env:
           AEGIS_TEST_PYTHON: ${{ runner.os == 'Windows' && 'python' || 'python3' }}
       - name: Python bridge tests (optional research extras may skip)
