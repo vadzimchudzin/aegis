@@ -11,7 +11,24 @@ pub(crate) fn reply(status: u16, body: String, delay: Duration) -> (String, thre
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let worker = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
+        // If client validation rejects before HTTP, fail the fixture instead of
+        // blocking worker.join() forever and hiding the original test failure.
+        listener.set_nonblocking(true).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let (mut stream, _) = loop {
+            match listener.accept() {
+                Ok(connection) => break connection,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "fixture received no HTTP request within 10 seconds"
+                    );
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("fixture accept failed: {error}"),
+            }
+        };
+        stream.set_nonblocking(false).unwrap();
         stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let mut reader = BufReader::new(stream.try_clone().unwrap());
         let mut line = String::new();
