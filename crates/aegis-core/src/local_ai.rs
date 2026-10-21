@@ -717,7 +717,21 @@ impl Runtime {
             }))
             .send()
             .await
-            .map_err(|e| format!("Observer inference failed or exceeded deadline: {e}"))?;
+            .map_err(|error| {
+                // A refused connection means the model server process is gone (out of memory,
+                // crash). Saying that plainly is more useful than a raw request URL, and the
+                // observer restarts the runtime on this marker before giving up.
+                if error.is_connect() {
+                    format!(
+                        "Observer inference failed: local model server is not running on {}; press Start in Local AI, server.log has the reason it stopped",
+                        self.endpoint
+                    )
+                } else if error.is_timeout() {
+                    format!("Observer inference failed or exceeded deadline: {error}")
+                } else {
+                    format!("Observer inference failed: {error}")
+                }
+            })?;
         let code = response.status();
         let value: Value = response.json().await.map_err(|e| e.to_string())?;
         if !code.is_success() || value["error"].is_string() {

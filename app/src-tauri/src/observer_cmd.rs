@@ -1070,6 +1070,16 @@ async fn decision_loop(app: AppHandle) {
                 }
             } => { continue; }
         };
+        // A model server can die mid-session (out of memory, crash). Restart it once and retry
+        // the same snapshot before giving up, so a single crash does not end the run and
+        // require a manual Start.
+        let response = match response {
+            Err(error) if error.contains("local model server is not running") && state.running() => {
+                let _ = crate::local_ai_cmd::local_ai_start(app.state::<LocalAiState>()).await;
+                local.observe(&prompt, &system).await
+            }
+            other => other,
+        };
         let response = match response {
             Ok(answer) => {
                 let local_decision = observer::parse_decision(&answer.response);
