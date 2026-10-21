@@ -176,11 +176,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      # Windows needs `python` pinned: without it python3 resolves to the Microsoft
+      # Store alias and the mock-venue test hangs. On Linux/macOS the hosted runners
+      # expose python3 (and no plain `python`), so fall back to python3 there.
       - run: cargo test --workspace --locked
         env:
-          AEGIS_TEST_PYTHON: python
+          AEGIS_TEST_PYTHON: ${{ runner.os == 'Windows' && 'python' || 'python3' }}
       - name: Python bridge tests (optional research extras may skip)
-        run: python -m unittest discover -s tests -v
+        run: ${{ runner.os == 'Windows' && 'python' || 'python3' }} -m unittest discover -s tests -v
         working-directory: python
       - run: npm ci
         working-directory: app
