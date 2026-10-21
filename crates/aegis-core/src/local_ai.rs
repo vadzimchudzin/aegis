@@ -103,6 +103,20 @@ pub async fn server_ready(endpoint: &str) -> bool {
         .is_some_and(|v| v["version"].as_str().is_some_and(|version| !version.trim().is_empty()))
 }
 
+/// A healthy server can miss one short probe while it loads a model or finishes a generation
+/// on the CPU. Retrying keeps it from being reported as "not running" and then duplicated.
+async fn ready_with_retries(endpoint: &str) -> bool {
+    for attempt in 0..3 {
+        if server_ready(endpoint).await {
+            return true;
+        }
+        if attempt < 2 {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+    }
+    false
+}
+
 pub fn progress(shared: &SharedProgress, stage: &str, completed: u64, total: u64) {
     let mut p = shared.lock().unwrap_or_else(|e| e.into_inner());
     p.stage = stage.into();
@@ -455,7 +469,7 @@ impl Runtime {
     }
 
     pub async fn start(&mut self) -> Result<(), String> {
-        if server_ready(&self.endpoint).await {
+        if ready_with_retries(&self.endpoint).await {
             return Ok(());
         }
         // A slow-starting owned process must not be duplicated.
@@ -503,6 +517,12 @@ impl Runtime {
                     }
                 };
                 if !alive {
+                    // A server already bound to this port (one left running by a previous
+                    // session, for example) makes our new child exit on bind. That is
+                    // readiness, not a failure: reuse it instead of claiming "not running".
+                    if server_ready(&self.endpoint).await {
+                        return Ok(());
+                    }
                     return Err(format!("Ollama exited. See {}", self.root.join("server.log").display()));
                 }
                 if server_ready(&self.endpoint).await {
