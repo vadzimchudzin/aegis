@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.7.0-beta.7 — Broker calendars, AI readiness, stale retry
+
+- The observer no longer reports weekend gaps as missing data. D1 Friday to Monday and H4
+  Friday evening to Monday are accepted; a hole in the middle of the week, a non-multiple
+  timestamp or a gap longer than four days is still refused. 4h and 1d frames are usable on
+  RoboForex again.
+- Local AI readiness is retried, and a child process that exits because the port is already
+  bound is treated as ready when the endpoint answers. A busy server is no longer reported as
+  "not running" and no longer triggers a duplicate start.
+- A stale MT5 snapshot is retried up to three times before failing; only staleness is retried
+  and the 2 s future / 10 s stale thresholds are unchanged.
+- Fixture-only verification; live broker acceptance remains outstanding. See
+  `docs/release-beta7.md`.
+
 ## 0.7.0-beta.6 — MT5 broker clock normalization
 
 - Paper start no longer fails with `quote timestamp is more than 2 seconds in the future`
