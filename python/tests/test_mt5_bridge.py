@@ -5,6 +5,7 @@ import os
 import sys
 import time
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "fake_mt5"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -149,6 +150,7 @@ class BridgeTest(unittest.TestCase):
         finally:
             fake._state["quote_age_seconds"] = 0
 
+    @patch.dict(os.environ, {"AEGIS_MT5_SERVER_OFFSET_SECONDS": "10800"})
     def test_broker_server_time_is_normalized_to_the_computer_clock(self):
         # RoboForex runs on EET: quote and bar timestamps arrive three hours ahead of UTC,
         # which the app rejected as "more than 2 seconds in the future".
@@ -168,7 +170,8 @@ class BridgeTest(unittest.TestCase):
         finally:
             fake.SERVER_OFFSET = saved
 
-    def test_small_clock_skew_is_absorbed(self):
+    @patch.dict(os.environ, {"AEGIS_MT5_SERVER_OFFSET_SECONDS": "3"})
+    def test_explicit_small_clock_skew_is_applied(self):
         # A computer clock a few seconds behind puts a live quote slightly ahead.
         saved = fake.SERVER_OFFSET
         fake.SERVER_OFFSET = 3
@@ -194,6 +197,42 @@ class BridgeTest(unittest.TestCase):
             self.assertEqual(conn["result"]["server_offset"], 0)
             self.assertGreater(time.time_ns() // 1_000_000 - snapshot["result"]["quote"]["time_ms"], 10_000)
         finally:
+            fake._state["quote_age_seconds"] = 0
+
+    @patch.dict(os.environ, {"AEGIS_MT5_SERVER_OFFSET_SECONDS": "10800"})
+    def test_broker_offset_preserves_stale_quote_age(self):
+        saved = fake.SERVER_OFFSET
+        fake.SERVER_OFFSET = 3 * 3600
+        try:
+            for age in (20, 900, 3600):
+                with self.subTest(age=age):
+                    fake._state["quote_age_seconds"] = age
+                    conn, snapshot = run(
+                        {"id": 1, "cmd": "connect", "login": 1, "password": "good", "server": "RoboForex-ECN"},
+                        {"id": 2, "cmd": "market_snapshot"},
+                    )
+                    self.assertTrue(snapshot["ok"], snapshot)
+                    self.assertEqual(conn["result"]["server_offset"], 10800)
+                    actual_age = time.time_ns() // 1_000_000 - snapshot["result"]["quote"]["time_ms"]
+                    self.assertLess(abs(actual_age - age * 1000), 3000)
+        finally:
+            fake.SERVER_OFFSET = saved
+            fake._state["quote_age_seconds"] = 0
+
+    @patch.dict(os.environ, {"AEGIS_MT5_SERVER_OFFSET_SECONDS": "0"})
+    def test_unknown_broker_offset_is_not_guessed_from_a_cached_tick(self):
+        saved = fake.SERVER_OFFSET
+        fake.SERVER_OFFSET = 3 * 3600
+        fake._state["quote_age_seconds"] = 900
+        try:
+            conn, snapshot = run(
+                {"id": 1, "cmd": "connect", "login": 1, "password": "good", "server": "RoboForex-ECN"},
+                {"id": 2, "cmd": "market_snapshot"},
+            )
+            self.assertEqual(conn["result"]["server_offset"], 0)
+            self.assertGreater(snapshot["result"]["quote"]["time_ms"] - time.time_ns() // 1_000_000, 9_000_000)
+        finally:
+            fake.SERVER_OFFSET = saved
             fake._state["quote_age_seconds"] = 0
 
     def test_live_fake_uses_plain_symbol_and_fresh_candles_on_all_timeframes(self):

@@ -317,7 +317,7 @@ impl FrameSummary {
         let period = self.timeframe.seconds() as u64 * 1000;
         if self.closed_at_ms == 0
             || self.closed_at_ms > now_ms
-            || now_ms - self.closed_at_ms > period + MAX_SAMPLE_AGE_MS
+            || !closed_history_fresh(self.closed_at_ms, now_ms, period)
         {
             return Err(format!(
                 "{} closed candles are stale or future-dated",
@@ -328,26 +328,46 @@ impl FrameSummary {
     }
 }
 
-/// Missing slots a broker legitimately has no bar for: weekends. A gap is accepted only when
-/// it is a whole number of timeframe periods and the skipped span contains a Saturday or a
-/// Sunday, so a hole in the middle of the week is still reported as a gap.
+/// Only UTC weekend slots may be absent; touching a weekend does not excuse a
+/// missing Monday or Friday bar. Broker-specific holidays remain fail-closed.
 fn acceptable_gap(previous: i64, next: i64, seconds: i64) -> bool {
     if seconds <= 0 || next <= previous {
         return false;
     }
     let gap = next - previous;
-    if gap % seconds != 0 {
+    if gap % seconds != 0 || gap - seconds > 4 * 86_400 {
         return false;
     }
-    let missing = gap / seconds - 1;
-    if missing <= 0 {
+    (1..gap / seconds).all(|slot| {
+        let day = (previous + slot * seconds).div_euclid(86_400);
+        matches!((day + 4).rem_euclid(7), 0 | 6)
+    })
+}
+
+/// Discount recognized weekend closure time, not quote age. Bounded to avoid
+/// scanning arbitrary timestamps and to reject history missing an entire week.
+fn closed_history_fresh(closed_at_ms: u64, now_ms: u64, period: u64) -> bool {
+    if closed_at_ms == 0 || closed_at_ms > now_ms {
+        return false;
+    }
+    let age = now_ms - closed_at_ms;
+    if age <= period + MAX_SAMPLE_AGE_MS {
         return true;
     }
-    // 1970-01-01 was a Thursday, so 0 is Sunday and 6 is Saturday.
-    let first_day = previous.div_euclid(86_400);
-    let last_day = next.div_euclid(86_400);
-    let covers_weekend = (first_day..=last_day).any(|day| matches!((day + 4).rem_euclid(7), 0 | 6));
-    covers_weekend && missing * seconds <= 4 * 86_400
+    if age > period + 4 * 86_400_000 + MAX_SAMPLE_AGE_MS {
+        return false;
+    }
+    let mut cursor = closed_at_ms;
+    let mut open_ms = 0;
+    while cursor < now_ms {
+        let day = cursor / 86_400_000;
+        let end = ((day + 1) * 86_400_000).min(now_ms);
+        if !matches!((day + 4) % 7, 0 | 6) {
+            open_ms += end - cursor;
+        }
+        cursor = end;
+    }
+    open_ms <= period + MAX_SAMPLE_AGE_MS
 }
 
 /// Summarize only bars that have closed by `now_ms`; future and forming bars
@@ -379,7 +399,7 @@ pub fn summarize(timeframe: Timeframe, bars: &[Candle], now_ms: u64) -> Result<F
     let last_index = closed.len() - 1;
     let last_closed = closed[last_index];
     let closed_at_ms = (last_closed.time as u64).saturating_add(seconds).saturating_mul(1000);
-    if now_ms.saturating_sub(closed_at_ms) > seconds * 1000 + MAX_SAMPLE_AGE_MS {
+    if !closed_history_fresh(closed_at_ms, now_ms, seconds * 1000) {
         return Err(format!("{} candle history is stale", timeframe.as_str()));
     }
     if closed[last_index - 20..]
@@ -2052,6 +2072,9 @@ pub(crate) mod tests {
         assert!(!acceptable_gap(monday, monday + 2 * 3600, 3600));
         // Twelve missing slots in the middle of the week are corruption, not a calendar.
         assert!(!acceptable_gap(monday + 4 * 3600, monday + 52 * 3600, 4 * 3600));
+        // A weekend must not hide a missing weekday slot.
+        assert!(!acceptable_gap(friday, monday + day, day));
+        assert!(!acceptable_gap(friday + 20 * 3600, monday + 4 * 3600, 4 * 3600));
         // A timestamp that is not a whole number of periods is corruption.
         assert!(!acceptable_gap(monday, monday + 3600 + 90, 3600));
     }
@@ -2083,5 +2106,28 @@ pub(crate) mod tests {
         let last = bars.last().unwrap().time;
         let now_ms = ((last + 86_400 + 60) * 1000) as u64;
         assert!(summarize(Timeframe::D1, &bars, now_ms).is_ok());
+    }
+    #[test]
+    fn monday_reopen_uses_friday_history_but_missing_weekdays_stay_stale() {
+        let friday = 1_792_108_800_u64 * 1000;
+        let monday = friday + 3 * 86_400_000;
+        let daily_close = friday + 86_400_000;
+        assert!(closed_history_fresh(daily_close, monday + 60_000, 86_400_000));
+        assert!(closed_history_fresh(daily_close, monday + 60_000, 14_400_000));
+        assert!(!closed_history_fresh(
+            daily_close,
+            monday + 14_400_000 + 31_000,
+            14_400_000
+        ));
+        assert!(!closed_history_fresh(
+            daily_close,
+            monday + 86_400_000 + 31_000,
+            86_400_000
+        ));
+        assert!(!closed_history_fresh(monday + 1, monday, 86_400_000));
+        let bars = weekday_daily_bars(21, friday as i64 / 1000 - 28 * 86_400);
+        let frame = summarize(Timeframe::D1, &bars, monday + 60_000).unwrap();
+        assert!(frame.validate_at(monday + 60_000).is_ok());
+        assert!(frame.validate_at(monday + 86_400_000 + 31_000).is_err());
     }
 }

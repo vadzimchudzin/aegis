@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.0-beta.8 — Screener overlays and fail-closed market timestamps
+
+- Bound and separate bounce axis labels; reject superseded refresh responses and archive-only live overlays.
+- Validate every skipped weekend slot and account for weekend closure at Monday reopen.
+- Replace unsafe single-tick clock inference with explicit `AEGIS_MT5_SERVER_OFFSET_SECONDS` (UTC by default).
+- Preserve model restart errors, guard session epochs and reject expired retry inputs.
+- Carry forward the successful OS-specific Python release build fix.
+- See `docs/release-beta8.md` for the required timestamp migration, verification scope and remaining limitations.
+
 ## 0.7.0-beta.7 — Broker calendars, AI readiness, stale retry
 
 - The observer no longer reports weekend gaps as missing data. D1 Friday to Monday and H4

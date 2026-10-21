@@ -37,12 +37,9 @@ MAX_TICKS = 256
 MAGIC = 26070552
 TRADE_SYMBOL = "XAUUSD"
 
-# Broker clock correction. An actively traded XAUUSD quote is under a second old, so its
-# timestamp minus local time IS the clock offset. A stale tick never produces an offset:
-# the honest failure for it is "stale", not a fabricated timezone shift.
+# MT5 timestamps are UTC by default. Nonstandard broker clocks must be configured
+# independently: a cached tick cannot distinguish a timezone offset from quote age.
 MAX_CLOCK_OFFSET_S = 14 * 3600
-CLOCK_SNAP_S = 900      # broker time zones are whole or half hours
-CLOCK_RESIDUAL_S = 5    # what remains after snapping is transmission delay
 
 
 class BridgeError(Exception):
@@ -159,36 +156,19 @@ class Bridge:
         raise BridgeError("this MT5 account has no XAUUSD symbol")
 
     def _server_offset(self, mt5, symbol=None):
-        """Seconds the broker clock is ahead of the local clock; 0 when they agree.
+        """Use only an independently verified offset; never turn cached ticks into now.
 
-        The MT5 Python package does not guarantee UTC: brokers running on EET (UTC+2/+3)
-        return server time, which the app sees as a quote hours in the future. A computer
-        clock that drifted a few seconds produces the same symptom. Both are measured
-        here, and a stale tick is refused instead of being turned into an offset.
+        AEGIS_MT5_SERVER_OFFSET_SECONDS is zero for standard UTC MT5 timestamps.
+        Set it only when the terminal's timestamp convention has been verified.
         """
-        name = symbol or self.symbol
-        if not name:
-            return 0
-        tick = mt5.symbol_info_tick(name)
-        if tick is None:
-            return 0
-        stamp_ms = getattr(tick, "time_msc", 0) or int(getattr(tick, "time", 0) or 0) * 1000
-        if not stamp_ms:
-            return 0
-        delta = stamp_ms / 1000.0 - time.time()
-        if abs(delta) <= 2.0:
-            return 0                                   # clocks already agree
-        # Only a quote that looks AHEAD is a clock problem. A quote behind is a stale
-        # tick, and rewriting it as "now" would hide exactly what the caller must see.
-        if delta <= 0:
-            return 0
-        if delta <= 60.0:
-            return int(round(delta))                   # small skew of a live tick
-        if delta <= MAX_CLOCK_OFFSET_S:
-            snapped = round(delta / CLOCK_SNAP_S) * CLOCK_SNAP_S
-            if abs(delta - snapped) <= CLOCK_RESIDUAL_S:
-                return int(snapped)                    # timezone-shaped difference
-        return 0                                       # implausible: do not guess
+        raw = os.environ.get("AEGIS_MT5_SERVER_OFFSET_SECONDS", "0")
+        try:
+            offset = int(raw)
+        except (TypeError, ValueError) as exc:
+            raise BridgeError("AEGIS_MT5_SERVER_OFFSET_SECONDS must be an integer") from exc
+        if abs(offset) > MAX_CLOCK_OFFSET_S:
+            raise BridgeError("AEGIS_MT5_SERVER_OFFSET_SECONDS exceeds the 14-hour limit")
+        return offset
 
     def candles(self, req):
         if not self.symbol:
