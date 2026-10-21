@@ -328,6 +328,28 @@ impl FrameSummary {
     }
 }
 
+/// Missing slots a broker legitimately has no bar for: weekends. A gap is accepted only when
+/// it is a whole number of timeframe periods and the skipped span contains a Saturday or a
+/// Sunday, so a hole in the middle of the week is still reported as a gap.
+fn acceptable_gap(previous: i64, next: i64, seconds: i64) -> bool {
+    if seconds <= 0 || next <= previous {
+        return false;
+    }
+    let gap = next - previous;
+    if gap % seconds != 0 {
+        return false;
+    }
+    let missing = gap / seconds - 1;
+    if missing <= 0 {
+        return true;
+    }
+    // 1970-01-01 was a Thursday, so 0 is Sunday and 6 is Saturday.
+    let first_day = previous.div_euclid(86_400);
+    let last_day = next.div_euclid(86_400);
+    let covers_weekend = (first_day..=last_day).any(|day| matches!((day + 4).rem_euclid(7), 0 | 6));
+    covers_weekend && missing * seconds <= 4 * 86_400
+}
+
 /// Summarize only bars that have closed by `now_ms`; future and forming bars
 /// are ignored. The resulting levels exclude the latest closed candle.
 pub fn summarize(timeframe: Timeframe, bars: &[Candle], now_ms: u64) -> Result<FrameSummary, String> {
@@ -362,7 +384,7 @@ pub fn summarize(timeframe: Timeframe, bars: &[Candle], now_ms: u64) -> Result<F
     }
     if closed[last_index - 20..]
         .windows(2)
-        .any(|pair| pair[1].time - pair[0].time != seconds as i64)
+        .any(|pair| !acceptable_gap(pair[0].time, pair[1].time, seconds as i64))
     {
         return Err(format!("{} recent candle history contains gaps", timeframe.as_str()));
     }
@@ -2015,5 +2037,51 @@ pub(crate) mod tests {
         assert_eq!(journal.export().unwrap().lines().count(), 2);
         drop(journal);
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn weekend_and_session_breaks_are_not_gaps_but_truncation_is() {
+        let day = 86_400;
+        let friday = 1_792_108_800; // 2026-10-16 00:00 UTC
+        let monday = friday + 3 * day;
+        // Daily Friday -> Monday: two slots the broker has no bar for.
+        assert!(acceptable_gap(friday, monday, day));
+        // Four-hour Friday 20:00 -> Monday 00:00: twelve missing slots across a weekend.
+        assert!(acceptable_gap(friday + 20 * 3600, monday, 4 * 3600));
+        // One missing slot in the middle of the week is still a gap, not a calendar.
+        assert!(!acceptable_gap(monday, monday + 2 * 3600, 3600));
+        // Twelve missing slots in the middle of the week are corruption, not a calendar.
+        assert!(!acceptable_gap(monday + 4 * 3600, monday + 52 * 3600, 4 * 3600));
+        // A timestamp that is not a whole number of periods is corruption.
+        assert!(!acceptable_gap(monday, monday + 3600 + 90, 3600));
+    }
+
+    fn weekday_daily_bars(count: usize, start: i64) -> Vec<Candle> {
+        let mut bars = Vec::new();
+        let mut time = start;
+        while bars.len() < count {
+            let weekday = (time.div_euclid(86_400) + 4).rem_euclid(7);
+            if weekday != 0 && weekday != 6 {
+                bars.push(Candle {
+                    time,
+                    open: 100.0,
+                    high: 101.0,
+                    low: 99.0,
+                    close: 100.5,
+                    volume: 1.0,
+                });
+            }
+            time += 86_400;
+        }
+        bars
+    }
+
+    #[test]
+    fn daily_history_across_weekends_summarizes() {
+        // Every weekend leaves a Friday -> Monday hole; that used to be reported as gaps.
+        let bars = weekday_daily_bars(25, 1_792_108_800);
+        let last = bars.last().unwrap().time;
+        let now_ms = ((last + 86_400 + 60) * 1000) as u64;
+        assert!(summarize(Timeframe::D1, &bars, now_ms).is_ok());
     }
 }
