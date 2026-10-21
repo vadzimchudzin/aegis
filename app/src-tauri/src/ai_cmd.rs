@@ -565,6 +565,7 @@ pub async fn ai_test(state: State<'_, AppState>, cloud: bool) -> Result<String, 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
         .build()
         .map_err(|_| "HTTP client failed")?;
     let response = client
