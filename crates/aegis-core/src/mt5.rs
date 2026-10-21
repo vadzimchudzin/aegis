@@ -60,6 +60,7 @@ impl Mt5Bridge {
         password: &str,
         server: &str,
         terminal_path: Option<&str>,
+        server_offset_seconds: Option<i32>,
     ) -> Probe<Self> {
         let mut list = Checklist::default();
         if login.trim().parse::<u64>().is_err() {
@@ -69,6 +70,16 @@ impl Mt5Bridge {
                 checks: list,
                 account: None,
             };
+        }
+        if let Some(offset) = server_offset_seconds {
+            if let Err(error) = crate::broker::parse_server_offset(&offset.to_string()) {
+                list.fail("input", "MT5 server clock offset", error.to_string());
+                return Probe {
+                    conn: None,
+                    checks: list,
+                    account: None,
+                };
+            }
         }
         let python = python
             .map(str::trim)
@@ -120,7 +131,10 @@ impl Mt5Bridge {
             }
         }
         let mut bridge = bridge;
-        match bridge.login(login, password, server, terminal_path).await {
+        match bridge
+            .login(login, password, server, terminal_path, server_offset_seconds)
+            .await
+        {
             Ok(result) => {
                 list.ok("login", "MT5 login", format!("{login} · {server}"));
                 if let Ok(checks) = serde_json::from_value::<Vec<Check>>(result["checks"].clone()) {
@@ -156,6 +170,7 @@ impl Mt5Bridge {
         password: &str,
         server: &str,
         terminal_path: Option<&str>,
+        server_offset_seconds: Option<i32>,
     ) -> Result<Value, BrokerError> {
         let login: u64 = require(login, "MT5 login")?
             .parse()
@@ -163,6 +178,9 @@ impl Mt5Bridge {
         let mut req = json!({"cmd": "connect", "login": login, "password": password.trim(), "server": server.trim()});
         if let Some(path) = terminal_path.map(str::trim).filter(|p| !p.is_empty()) {
             req["terminal_path"] = json!(path);
+        }
+        if let Some(offset) = server_offset_seconds {
+            req["server_offset_seconds"] = json!(offset);
         }
         let result = self.request(req, CONNECT_TIMEOUT).await?;
         let symbol = result["symbol"]

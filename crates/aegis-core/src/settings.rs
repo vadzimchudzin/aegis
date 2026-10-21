@@ -534,6 +534,44 @@ mod tests {
     }
 
     #[test]
+    fn mt5_offset_persists_publicly_and_blank_restores_fallback() {
+        let path = tmp("mt5-offset");
+        let key = [17; 32];
+        let mut store = SettingsStore::open_with_key(&path, key);
+        store.apply_form(
+            BrokerId::Roboforex,
+            &form(&[
+                ("login", "1"),
+                ("password", "secret"),
+                ("server", "demo"),
+                ("server_offset_seconds", "+10800"),
+            ]),
+        );
+        store.save().unwrap();
+        let mut restored = SettingsStore::open_with_key(&path, key);
+        let public = restored.public();
+        let broker = &public.brokers[&BrokerId::Roboforex];
+        assert_eq!(broker.values["server_offset_seconds"], "+10800");
+        assert!(!broker.stored.iter().any(|key| key == "server_offset_seconds"));
+        assert!(broker.stored.iter().any(|key| key == "password"));
+        restored.apply_form(
+            BrokerId::Roboforex,
+            &form(&[
+                ("login", "1"),
+                ("password", ""),
+                ("server", "demo"),
+                ("server_offset_seconds", ""),
+            ]),
+        );
+        restored.save().unwrap();
+        let again = SettingsStore::open_with_key(&path, key);
+        assert!(!again.public().brokers[&BrokerId::Roboforex]
+            .values
+            .contains_key("server_offset_seconds"));
+        assert_eq!(again.credentials(BrokerId::Roboforex)["password"], "secret");
+    }
+
+    #[test]
     fn credentials_round_trip_encrypted_on_disk() {
         let path = tmp("roundtrip");
         let mut s = SettingsStore::open_with_key(&path, [7; 32]);

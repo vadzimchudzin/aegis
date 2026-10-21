@@ -44,7 +44,13 @@ async fn connects_with_terminal_checklist_and_utc_candles() {
             ("algo", Warn), // fake terminal has Algo Trading off
             ("trading", Ok),
             ("symbol", Ok),
-            ("clock", Ok), // the bridge reports the measured broker clock correction
+            ("clock", Ok), // configured correction; never measured from a cached tick
+            ("clock_source", Ok),
+            ("clock_formula", Ok),
+            ("clock_raw", Ok),
+            ("clock_computer", Ok),
+            ("clock_age", Ok),
+            ("clock_guidance", Ok),
             ("balance", Ok)
         ]
     );
@@ -157,4 +163,46 @@ async fn reads_account_places_confirmed_order_and_closes_owned_position() {
     conn.close().await;
     std::env::remove_var("AEGIS_TRADE_LEDGER_DIR");
     let _ = std::fs::remove_dir_all(ledger);
+}
+
+#[tokio::test]
+async fn explicit_offset_reaches_python_and_preserves_stale_quotes() {
+    let c: Credentials = serde_json::from_value(serde_json::json!({
+        "broker": "roboforex", "login": "1", "password": "good", "server": "RoboForex-ECN",
+        "python": std::env::var("AEGIS_TEST_PYTHON").unwrap_or_default(), "server_offset_seconds": 3600
+    }))
+    .unwrap();
+    let (conn, report) = Connector::connect(c, &options()).await;
+    let conn = conn.unwrap_or_else(|| panic!("connect: {report:?}"));
+    let clock = report.checks.iter().find(|c| c.id == "clock").unwrap();
+    assert_eq!(clock.detail, "+3600");
+    assert_eq!(
+        report.checks.iter().find(|c| c.id == "clock_source").unwrap().detail,
+        "connection setting"
+    );
+    assert_eq!(
+        report.checks.iter().find(|c| c.id == "clock_age").unwrap().status,
+        CheckStatus::Warn
+    );
+    let bars = conn.candles(Timeframe::M15, 3).await.unwrap();
+    assert_eq!(bars[0].time, 1_790_208_000 - 3600);
+    let error = conn
+        .market_sample()
+        .await
+        .expect_err("stale quote must remain rejected");
+    assert!(error.to_string().contains("stale"), "{error}");
+    conn.close().await;
+}
+
+#[tokio::test]
+async fn out_of_range_typed_offset_is_rejected_before_python_spawn() {
+    let c: Credentials = serde_json::from_value(serde_json::json!({
+        "broker": "roboforex", "login": "1", "password": "good", "server": "x",
+        "python": "/must/not/be/started", "server_offset_seconds": 50401
+    }))
+    .unwrap();
+    let (conn, report) = Connector::connect(c, &options()).await;
+    assert!(conn.is_none());
+    assert_eq!(report.checks[0].id, "input");
+    assert!(report.checks[0].detail.contains("50400"));
 }

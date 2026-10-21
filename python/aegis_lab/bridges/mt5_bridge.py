@@ -15,6 +15,7 @@ import json
 import hashlib
 import math
 import os
+import re
 import sys
 import tempfile
 import time
@@ -51,6 +52,7 @@ class Bridge:
         self._mt5 = mt5
         self.symbol = None
         self.offset = 0
+        self.offset_source = "UTC default"
         self._ledger_path = None
         self._account_identity = None
 
@@ -76,6 +78,9 @@ class Bridge:
 
     def connect(self, req):
         self._account_identity = None
+        self.symbol = None
+        # Resolve once, before login. An invalid explicit setting must never fall back.
+        self.offset, self.offset_source = self._clock_config(req)
         mt5 = self.mt5()
         kwargs = {
             "login": int(req["login"]),
@@ -90,7 +95,6 @@ class Bridge:
             mt5.shutdown()
             raise BridgeError(f"MT5 login failed ({code}): {message}")
         self.symbol = self._find_symbol(mt5)
-        self.offset = self._server_offset(mt5)
         info = mt5.account_info()
         self._account_identity = (int(info.login), str(info.server)) if info else None
         identity = f"{info.login}:{info.server}" if info else str(kwargs["login"])
@@ -135,13 +139,26 @@ class Bridge:
         sym = mt5.symbol_info(self.symbol)
         spread = f" · spread {sym.spread} points" if sym is not None and getattr(sym, "spread", None) else ""
         add("symbol", "Gold symbol", "ok", f"{self.symbol}{spread}")
-        if self.offset:
-            hours, minutes = divmod(abs(self.offset) // 60, 60)
-            sign = "+" if self.offset > 0 else "-"
-            add("clock", "Broker clock", "ok",
-                f"server time {sign}{hours}h {minutes:02d}m, normalized to the computer clock")
-        else:
-            add("clock", "Broker clock", "ok", "matches the computer clock")
+        add("clock", "Configured broker offset (seconds)", "ok", f"{self.offset:+d}")
+        add("clock_source", "Clock configuration source", "ok", self.offset_source)
+        add("clock_formula", "Clock normalization", "ok",
+            "Normalized UTC = raw timestamp - configured offset. No automatic timezone detection. Reconnect after changing the setting.")
+        tick = mt5.symbol_info_tick(self.symbol)
+        now_ms = time.time_ns() // 1_000_000
+        raw_ms = (getattr(tick, "time_msc", 0) or int(getattr(tick, "time", 0)) * 1000) if tick else 0
+        utc = lambda ms: datetime.fromtimestamp(ms / 1000, timezone.utc).isoformat(timespec="milliseconds")
+        add("clock_raw", "Raw quote timestamp (UTC)", "ok" if raw_ms > 0 else "warn",
+            utc(raw_ms) if raw_ms > 0 else "MT5 quote has no timestamp")
+        add("clock_computer", "Computer UTC time", "ok", utc(now_ms))
+        age_ms = now_ms - (int(raw_ms) - self.offset * 1000) if raw_ms > 0 else None
+        # Match the Rust live quote freshness limits; do not mutate or refresh ticks.
+        status = "warn" if age_ms is None or age_ms < -2000 or age_ms > 10000 else "ok"
+        add("clock_age", "Normalized quote age", status,
+            "unavailable" if age_ms is None else f"{age_ms / 1000:.3f} s")
+        add("clock_guidance", "MT5 clock guidance", "warn" if status == "warn" else "ok",
+            "Your local timezone (including UTC+5) does not set the broker offset. Keep Windows time synchronized. "
+            "Confirm the broker timestamp convention independently; a future/stale quote does not prove an offset. "
+            "Set the confirmed offset in the broker connection form and reconnect. Freshness protection remains enabled (future < -2 s; stale > 10 s).")
         if info is not None:
             status = "ok" if info.balance > 0 else "warn"
             add("balance", "Balance", status, f"{info.currency} {info.balance:.2f}")
@@ -155,20 +172,31 @@ class Bridge:
                 return name
         raise BridgeError("this MT5 account has no XAUUSD symbol")
 
-    def _server_offset(self, mt5, symbol=None):
-        """Use only an independently verified offset; never turn cached ticks into now.
-
-        AEGIS_MT5_SERVER_OFFSET_SECONDS is zero for standard UTC MT5 timestamps.
-        Set it only when the terminal's timestamp convention has been verified.
-        """
-        raw = os.environ.get("AEGIS_MT5_SERVER_OFFSET_SECONDS", "0")
-        try:
-            offset = int(raw)
-        except (TypeError, ValueError) as exc:
-            raise BridgeError("AEGIS_MT5_SERVER_OFFSET_SECONDS must be an integer") from exc
+    @staticmethod
+    def _parse_offset(raw, label):
+        # JSON integers and ASCII signed decimal strings only: reject bools/floats.
+        if type(raw) is int:
+            offset = raw
+        elif isinstance(raw, str) and re.fullmatch(r"[+-]?[0-9]+", raw.strip()):
+            offset = int(raw.strip())
+        else:
+            raise BridgeError(f"{label} must be a signed integer in seconds")
         if abs(offset) > MAX_CLOCK_OFFSET_S:
-            raise BridgeError("AEGIS_MT5_SERVER_OFFSET_SECONDS exceeds the 14-hour limit")
+            raise BridgeError(f"{label} exceeds the 14-hour limit (-50400 to +50400 seconds)")
         return offset
+
+    @classmethod
+    def _clock_config(cls, req):
+        if "server_offset_seconds" in req:
+            return cls._parse_offset(req["server_offset_seconds"], "server_offset_seconds"), "connection setting"
+        key = "AEGIS_MT5_SERVER_OFFSET_SECONDS"
+        if key in os.environ:
+            return cls._parse_offset(os.environ[key], key), "environment"
+        return 0, "UTC default"
+
+    def _server_offset(self, mt5, symbol=None):
+        """Compatibility helper; never infer a clock correction from a tick."""
+        return self._clock_config({})[0]
 
     def candles(self, req):
         if not self.symbol:
@@ -266,7 +294,7 @@ class Bridge:
         copy_ticks = getattr(mt5, "copy_ticks_from", None)
         if copy_ticks is None:
             raise BridgeError("MT5 tick history API unavailable")
-        since = datetime.fromtimestamp(start / 1000, timezone.utc)
+        since = datetime.fromtimestamp(start / 1000 + self.offset, timezone.utc)
         try:
             history = copy_ticks(self.symbol, since, limit + 1, mt5.COPY_TICKS_ALL)
         except Exception as exc:
@@ -320,8 +348,6 @@ class Bridge:
         if terminal is None or not terminal.connected:
             raise BridgeError("MT5 terminal is disconnected")
 
-        if not self.offset:
-            self.offset = self._server_offset(mt5)
         tick = mt5.symbol_info_tick(self.symbol)
         if tick is None:
             code, message = mt5.last_error()
@@ -342,7 +368,7 @@ class Bridge:
         ticks = []
         copy_ticks = getattr(mt5, "copy_ticks_from", None)
         if copy_ticks is not None:
-            since = datetime.fromtimestamp(quote["time_ms"] / 1000, timezone.utc) - timedelta(seconds=10)
+            since = datetime.fromtimestamp(quote_time / 1000, timezone.utc) - timedelta(seconds=10)
             try:
                 history = copy_ticks(self.symbol, since, MAX_TICKS, mt5.COPY_TICKS_ALL)
             except Exception:

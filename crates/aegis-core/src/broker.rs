@@ -138,6 +138,12 @@ impl BrokerId {
                     },
                     CredentialField {
                         optional: true,
+                        placeholder: "",
+                        ..field("server_offset_seconds", "MT5 server clock offset", false,
+                            "Confirmed broker timestamp offset from UTC, in seconds (-50400 to +50400). Blank uses environment/UTC; 0 forces UTC. Your local timezone (including UTC+5) is unrelated. Confirm with your broker, then reconnect.")
+                    },
+                    CredentialField {
+                        optional: true,
                         placeholder: "python",
                         ..field("python", "Python", false, "Path to python.exe if it is not on PATH.")
                     },
@@ -171,6 +177,8 @@ pub enum Credentials {
         terminal_path: Option<String>,
         #[serde(default)]
         python: Option<String>,
+        #[serde(default)]
+        server_offset_seconds: Option<i32>,
     },
 }
 
@@ -207,9 +215,23 @@ impl Credentials {
                 server: get("server"),
                 terminal_path: opt("terminal_path"),
                 python: opt("python"),
+                server_offset_seconds: opt("server_offset_seconds")
+                    .map(|raw| parse_server_offset(&raw))
+                    .transpose()?,
             },
         })
     }
+}
+
+/// Strict signed decimal seconds, not a timezone inferred from cached quotes.
+pub(crate) fn parse_server_offset(raw: &str) -> Result<i32, BrokerError> {
+    let digits = raw.strip_prefix(['+', '-']).unwrap_or(raw);
+    let offset = raw.parse::<i32>().ok().filter(|value| {
+        !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) && (-50400..=50400).contains(value)
+    });
+    offset.ok_or_else(|| {
+        BrokerError::Input("MT5 server clock offset must be a signed integer between -50400 and +50400 seconds".into())
+    })
 }
 
 impl fmt::Debug for Credentials {
@@ -373,6 +395,7 @@ impl Connector {
                 server,
                 terminal_path,
                 python,
+                server_offset_seconds,
             } => match options.mt5_bridge_script.clone() {
                 None => Err(BrokerError::Bridge(
                     "bridge script is missing from the app bundle".into(),
@@ -385,6 +408,7 @@ impl Connector {
                         &password,
                         &server,
                         terminal_path.as_deref(),
+                        server_offset_seconds,
                     )
                     .await,
                     |b| Connector::Roboforex(Box::new(b)),
@@ -564,6 +588,66 @@ mod tests {
             Credentials::Roboforex {
                 python: None,
                 terminal_path: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn explicit_mt5_offset_is_optional_nonsecret_and_strict() {
+        let info = BrokerId::Roboforex.info();
+        let field = info.fields.iter().find(|f| f.key == "server_offset_seconds").unwrap();
+        assert!(field.optional && !field.secret);
+        for (raw, expected) in [("0", 0), ("+10800", 10800), ("-50400", -50400), ("50400", 50400)] {
+            let c = Credentials::from_fields(
+                BrokerId::Roboforex,
+                &fields(&[
+                    ("login", "1"),
+                    ("password", "p"),
+                    ("server", "x"),
+                    ("server_offset_seconds", raw),
+                ]),
+            )
+            .unwrap();
+            assert!(
+                matches!(c, Credentials::Roboforex { server_offset_seconds: Some(value), .. } if value == expected)
+            );
+        }
+        for raw in [
+            "50401",
+            "-50401",
+            "1.5",
+            "3h",
+            "1_000",
+            "--1",
+            "１２",
+            "999999999999999999",
+        ] {
+            assert!(Credentials::from_fields(
+                BrokerId::Roboforex,
+                &fields(&[
+                    ("login", "1"),
+                    ("password", "p"),
+                    ("server", "x"),
+                    ("server_offset_seconds", raw)
+                ])
+            )
+            .is_err());
+        }
+        let c = Credentials::from_fields(
+            BrokerId::Roboforex,
+            &fields(&[
+                ("login", "1"),
+                ("password", "p"),
+                ("server", "x"),
+                ("server_offset_seconds", " "),
+            ]),
+        )
+        .unwrap();
+        assert!(matches!(
+            c,
+            Credentials::Roboforex {
+                server_offset_seconds: None,
                 ..
             }
         ));

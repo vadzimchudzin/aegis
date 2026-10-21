@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import MetaTrader5 as fake  # noqa: E402
 
-from aegis_lab.bridges.mt5_bridge import Bridge, serve  # noqa: E402
+from aegis_lab.bridges.mt5_bridge import Bridge, BridgeError, serve  # noqa: E402
 
 def _real_mt5_installed():
     """True when a MetaTrader5 package exists outside the test fixture.
@@ -59,7 +59,105 @@ class BridgeTest(unittest.TestCase):
         self.assertEqual(bars["result"][0]["volume"], 100.0)
         checks = {c["id"]: c["status"] for c in conn["result"]["checks"]}
         self.assertEqual(checks, {"terminal": "ok", "algo": "warn", "trading": "ok", "symbol": "ok",
-                                  "clock": "ok", "balance": "ok"})
+                                  "clock": "ok", "clock_source": "ok", "clock_formula": "ok", "clock_raw": "ok", "clock_computer": "ok",
+                                  "clock_age": "ok", "clock_guidance": "ok", "balance": "ok"})
+
+    def test_clock_config_precedence_and_strict_validation(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(Bridge._clock_config({}), (0, "UTC default"))
+        with patch.dict(os.environ, {"AEGIS_MT5_SERVER_OFFSET_SECONDS": "10800"}):
+            self.assertEqual(Bridge._clock_config({}), (10800, "environment"))
+            for raw, expected in [(0, 0), ("+3600", 3600), (-50400, -50400), (50400, 50400)]:
+                self.assertEqual(Bridge._clock_config({"server_offset_seconds": raw}), (expected, "connection setting"))
+            for raw in [None, "", " ", "3h", "1.5", 1.5, True, False, 50401, -50401, "1_000", "１２"]:
+                with self.subTest(raw=raw), self.assertRaises(BridgeError):
+                    Bridge._clock_config({"server_offset_seconds": raw})
+        with patch.dict(os.environ, {"AEGIS_MT5_SERVER_OFFSET_SECONDS": "invalid"}):
+            self.assertEqual(Bridge._clock_config({"server_offset_seconds": 0})[0], 0)
+            with self.assertRaises(BridgeError):
+                Bridge._clock_config({})
+
+    def test_invalid_explicit_offset_is_rejected_before_terminal_login(self):
+        with patch.dict(os.environ, {"AEGIS_MT5_SERVER_OFFSET_SECONDS": "0"}), patch.object(fake, "initialize") as login:
+            reply, = run({"id": 1, "cmd": "connect", "login": 1, "password": "good", "server": "x",
+                          "server_offset_seconds": "invalid"})
+            self.assertFalse(reply["ok"])
+            self.assertIn("server_offset_seconds", reply["error"])
+            login.assert_not_called()
+
+    def test_explicit_zero_remains_immutable_until_reconnect(self):
+        bridge = Bridge(fake)
+        req = {"login": 1, "password": "good", "server": "x", "server_offset_seconds": 0}
+        with patch.dict(os.environ, {"AEGIS_MT5_SERVER_OFFSET_SECONDS": "10800"}):
+            bridge.connect(req)
+            bridge.market_snapshot({})
+            self.assertEqual(bridge.offset, 0)
+        with patch.dict(os.environ, {"AEGIS_MT5_SERVER_OFFSET_SECONDS": "invalid"}):
+            bridge.market_snapshot({})
+            self.assertEqual(bridge.offset, 0)
+        with patch.dict(os.environ, {"AEGIS_MT5_SERVER_OFFSET_SECONDS": "3600"}):
+            bridge.connect({k: v for k, v in req.items() if k != "server_offset_seconds"})
+            self.assertEqual(bridge.offset, 3600)
+
+    def test_explicit_offset_corrects_quotes_candles_ticks_but_preserves_age(self):
+        saved = fake.SERVER_OFFSET
+        fake.SERVER_OFFSET = 10800
+        try:
+            for age in (0, 20, 900, 3600):
+                fake._state["quote_age_seconds"] = age
+                conn, bars, snapshot = run(
+                    {"id": 1, "cmd": "connect", "login": 1, "password": "good", "server": "x", "server_offset_seconds": 10800},
+                    {"id": 2, "cmd": "candles", "timeframe": "15m", "limit": 3},
+                    {"id": 3, "cmd": "market_snapshot"},
+                )
+                self.assertEqual(conn["result"]["server_offset"], 10800)
+                self.assertEqual(bars["result"][0]["time"], 1_790_208_000)
+                actual_age = time.time_ns() // 1_000_000 - snapshot["result"]["quote"]["time_ms"]
+                self.assertLess(abs(actual_age - age * 1000), 3000)
+                self.assertTrue(all(abs(time.time_ns() // 1_000_000 - tick["time_ms"]) < 10000
+                                    for tick in snapshot["result"]["ticks"]))
+                checks = {c["id"]: c for c in conn["result"]["checks"]}
+                self.assertEqual(checks["clock_age"]["status"], "warn" if age else "ok")
+                self.assertIn("+00:00", checks["clock_raw"]["detail"])
+                self.assertIn("UTC+5", checks["clock_guidance"]["detail"])
+                self.assertNotIn("auto timezone", checks["clock"]["detail"])
+        finally:
+            fake.SERVER_OFFSET = saved
+            fake._state["quote_age_seconds"] = 0
+
+    def test_clock_diagnostics_warn_future_without_guessing_offset(self):
+        saved = fake.SERVER_OFFSET
+        fake.SERVER_OFFSET = 10800
+        try:
+            reply, = run({"id": 1, "cmd": "connect", "login": 1, "password": "good", "server": "x", "server_offset_seconds": 0})
+            checks = {c["id"]: c for c in reply["result"]["checks"]}
+            self.assertEqual(reply["result"]["server_offset"], 0)
+            self.assertEqual(checks["clock_age"]["status"], "warn")
+            self.assertTrue(checks["clock_age"]["detail"].startswith("-"))
+        finally:
+            fake.SERVER_OFFSET = saved
+
+    @unittest.skipUnless(hasattr(time, "tzset"), "tzset is unavailable on Windows")
+    def test_clock_normalization_is_independent_of_local_timezone(self):
+        old_tz = os.environ.get("TZ")
+        try:
+            outcomes = []
+            for zone in ("UTC0", "UTC-5", "UTC+7"):
+                os.environ["TZ"] = zone
+                time.tzset()
+                with patch("aegis_lab.bridges.mt5_bridge.time.time_ns", return_value=1_790_208_000_000_000_000), patch.object(fake.time, "time", return_value=1_790_208_000):
+                    reply, bars = run(
+                        {"id": 1, "cmd": "connect", "login": 1, "password": "good", "server": "x", "server_offset_seconds": 10800},
+                        {"id": 2, "cmd": "candles", "timeframe": "15m", "limit": 3})
+                outcomes.append((reply["result"]["checks"], bars["result"]))
+            self.assertEqual(outcomes[0], outcomes[1])
+            self.assertEqual(outcomes[1], outcomes[2])
+        finally:
+            if old_tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = old_tz
+            time.tzset()
 
     def test_order_book_uses_terminal_dom_and_releases_subscription(self):
         released_before = fake._state["book_releases"]
@@ -152,7 +250,7 @@ class BridgeTest(unittest.TestCase):
 
     @patch.dict(os.environ, {"AEGIS_MT5_SERVER_OFFSET_SECONDS": "10800"})
     def test_broker_server_time_is_normalized_to_the_computer_clock(self):
-        # RoboForex runs on EET: quote and bar timestamps arrive three hours ahead of UTC,
+        # Simulated nonstandard broker: quote and bar timestamps arrive three hours ahead of UTC,
         # which the app rejected as "more than 2 seconds in the future".
         saved = fake.SERVER_OFFSET
         fake.SERVER_OFFSET = 3 * 3600

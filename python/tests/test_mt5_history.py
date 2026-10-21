@@ -31,6 +31,16 @@ class HistoryTest(unittest.TestCase):
         self.assertEqual(args[0],'XAUUSD.r');self.assertEqual(args[2],3)
         self.assertEqual(args[1].utcoffset().total_seconds(),0)
         self.assertNotIn('password',data);self.assertNotIn('login',data)
+    def test_explicit_offset_queries_raw_domain_and_returns_normalized_utc(self):
+        for offset in (10800, -18000, 0):
+            with self.subTest(offset=offset):
+                self.bridge.offset = offset
+                self.mt5.copy_ticks_from.return_value = [self.row(self.start + offset * 1000)]
+                data = self.bridge.history_ticks(self.request)
+                self.assertEqual(data['ticks'][0]['time_ms'], self.start)
+                self.assertAlmostEqual(self.mt5.copy_ticks_from.call_args.args[1].timestamp(),
+                                       self.start / 1000 + offset, places=3)
+
     def test_invalid_query_never_reaches_tick_api(self):
         for change in [{'start_ms':True},{'max_ticks':0},{'max_ticks':2001},{'end_ms':self.now+10000},{'end_ms':self.start},{'start_ms':self.end-36_000_001},{'symbol':'OTHER'}]:
             with self.subTest(change=change),self.assertRaises(BridgeError):self.bridge.history_ticks({**self.request,**change})

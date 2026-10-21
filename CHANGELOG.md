@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.0-beta.9
+
+- Persistent optional MT5 server timestamp offset in the broker connection GUI, with explicit UTC/±hour choices; connection configuration overrides environment/UTC defaults, never inferred from ticks.
+- Strict signed-second validation within ±14 hours; invalid explicit input fails rather than falling back. Reconnect applies one immutable correction to quotes, candles and tick history.
+- Connection checklist shows raw UTC quote timestamp, computer UTC time, configured offset/source and normalized quote age. Future/stale data remains warned and rejected by existing freshness guards.
+- Russian/Kazakh labels and clock guidance; Windows UTC+5 and broker-confirmation steps in `docs/release-beta9.md`.
+- Fix Linux process-tree stop test fixture PID publication race atomically without weakening the runner-kill assertion.
+
+
 ## 0.7.0-beta.8 — Screener overlays and fail-closed market timestamps
 
 - Bound and separate bounce axis labels; reject superseded refresh responses and archive-only live overlays.
