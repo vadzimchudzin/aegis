@@ -22,6 +22,13 @@ Paper is the default; Money remains off unless explicitly armed for the current 
   10-second staleness budget without a tick. The snapshot is requested up to three times,
   700 ms apart, and only staleness is retried; every other validation error still fails
   immediately and the thresholds are unchanged.
+- **A model server that dies mid-session is restarted once.** A refused connection to 11435
+  used to surface as `error sending request for url (...)`, which reads like a network fault,
+  and it ended the run until a manual Start even when the server had exited after passing the
+  readiness check. A connect failure now says that the local model server is not running, and
+  the decision loop restarts the runtime once and retries the same snapshot. Timeouts are not
+  retried, and the event scoring path still rejects an event on failure instead of retrying
+  it, because a retry there could duplicate tool dispatch.
 
 ## Verification and limitations
 
