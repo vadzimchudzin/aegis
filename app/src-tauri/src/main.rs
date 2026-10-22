@@ -3,6 +3,7 @@
 mod ai_cmd;
 mod bounce_cmd;
 mod density_cmd;
+mod health_cmd;
 mod local_ai_cmd;
 mod observer_cmd;
 mod structural_cmd;
@@ -534,6 +535,7 @@ fn main() {
             density_cmd::setup_window(app.handle())?;
             async_runtime::spawn(density_cmd::run(app.handle().clone()));
             async_runtime::spawn(ai_cmd::run(app.handle().clone()));
+            async_runtime::spawn(health_cmd::run(app.handle().clone()));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -547,6 +549,10 @@ fn main() {
             ai_cmd::ai_test,
             ai_cmd::ai_setup_model,
             bootstrap,
+            health_cmd::health_check,
+            health_cmd::health_repair,
+            health_cmd::health_ai_diagnose,
+            health_cmd::provider_models,
             settings_get,
             sessions,
             broker_connect,

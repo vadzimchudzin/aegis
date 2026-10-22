@@ -490,8 +490,11 @@
     } else if (kind === "theme") {
       $("panelTitle").textContent = t("Settings");
       $("panel").classList.add("wide");
-      S.settingsTab = "appearance";
+      S.settingsTab = focus || "appearance";
+      document.querySelectorAll(".rail-item").forEach((b) => b.classList.toggle("on", b.dataset.panel === (S.settingsTab === "diagnostics" ? "diagnostics" : "theme")));
       renderThemePanel();
+    } else if (kind === "diagnostics") {
+      openPanel("theme", "diagnostics");
     }
   }
 
@@ -637,15 +640,35 @@
     }
   }
 
+  const SETTINGS_TABS = [
+    ["appearance", "Appearance"],
+    ["trading", "AI trading"],
+    ["models", "Models"],
+    ["diagnostics", "Diagnostics"],
+  ];
+
+  function settingsTabLabel(id, fallback) {
+    const ru = { appearance: "Внешний вид", trading: "AI-торговля", models: "Модели", diagnostics: "Диагностика" };
+    const kk = { appearance: "Сыртқы түрі", trading: "ЖИ сауда", models: "Модельдер", diagnostics: "Диагностика" };
+    const lang = window.I18N.lang;
+    return lang === "ru" ? ru[id] : lang === "kk" ? kk[id] : fallback;
+  }
+
   function renderThemePanel() {
     const current = S.settings.theme;
     const lang = window.I18N.lang;
-    $("panelBody").innerHTML = `<nav class="settings-tabs" aria-label="${esc(t("Settings"))}"><button type="button" class="settings-tab${S.settingsTab === "appearance" ? " on" : ""}" data-settings-tab="appearance">${esc(t("Appearance"))}</button><button type="button" class="settings-tab${S.settingsTab === "ai" ? " on" : ""}" data-settings-tab="ai">AI</button></nav><div id="settingsContent"></div>`;
+    if (!SETTINGS_TABS.some(([id]) => id === S.settingsTab)) S.settingsTab = "appearance";
+    $("panelBody").innerHTML = `<nav class="settings-tabs" aria-label="${esc(t("Settings"))}">${SETTINGS_TABS.map(
+      ([id, label]) => `<button type="button" class="settings-tab${S.settingsTab === id ? " on" : ""}" data-settings-tab="${id}">${esc(settingsTabLabel(id, label))}${id === "diagnostics" && S.health?.counts?.fail ? `<span class="tab-badge">${S.health.counts.fail}</span>` : ""}</button>`,
+    ).join("")}</nav><div id="settingsContent"></div>`;
     const content = $("settingsContent");
-    if (S.settingsTab === "ai") {
-      content.innerHTML = `<div data-ai-settings></div><section class="settings-local-ai"><h3>${esc(t("Local AI"))}</h3><div data-local-ai></div></section>`;
+    if (S.settingsTab === "trading") {
+      content.innerHTML = `<div data-ai-settings></div>`;
       window.AEGIS.observer?.renderSettings(content.querySelector("[data-ai-settings]"));
-      window.AEGIS.localAI?.render(content.querySelector("[data-local-ai]"));
+    } else if (S.settingsTab === "models") {
+      window.AEGIS.diag?.renderModels(content);
+    } else if (S.settingsTab === "diagnostics") {
+      window.AEGIS.diag?.render(content);
     } else {
       content.innerHTML = `<div class="field"><label>${esc(t("Language"))}</label></div><div class="lang-row" id="langRow">${window.I18N.LANGS.map(
       ([id, name]) => `<button type="button" class="ghost sm${id === lang ? " on" : ""}" data-lang="${id}">${esc(name)}</button>`,
@@ -658,6 +681,7 @@
     $("panelBody").querySelectorAll("[data-settings-tab]").forEach((button) => {
       button.onclick = () => {
         S.settingsTab = button.dataset.settingsTab;
+        $("panelBody").scrollTop = 0;
         renderThemePanel();
       };
     });
@@ -675,6 +699,11 @@
         renderThemePanel();
       };
     });
+  }
+
+  /** Opens Settings on one tab: appearance, trading, models or diagnostics. */
+  function openSettings(tab) {
+    openPanel("theme", tab);
   }
 
   /** Switches the interface language and redraws everything that holds text. */
@@ -713,11 +742,31 @@
       S.chart.lastTime = c.time;
       showLast(c);
     });
+    tauri.event.listen("health_changed", ({ payload }) => {
+      if (payload?.reason === "auto") {
+        log(`${t("Automatic recovery")}: ${payload.message}`, payload.ok ? "ok" : "bad");
+        afterRepair();
+      }
+    });
     tauri.event.listen("feed_status", ({ payload }) => {
       if (payload.generation !== S.chart.generation) return;
       setLamp(payload.ok ? "ok" : "halt", payload.message);
       if (!payload.ok) log(`Feed: ${payload.message}`, "bad");
     });
+  }
+
+  /** Re-reads sessions after Repair or an automatic recovery and reloads what they feed. */
+  async function afterRepair() {
+    try {
+      await refreshSessions();
+      S.settings = await invoke("settings_get");
+    } catch (err) {
+      log(`Refresh: ${err}`, "warn");
+    }
+    renderChartChrome();
+    if (S.panel === "brokers") renderBrokersPanel();
+    if (S.chart.broker && S.sessions[S.chart.broker]) await loadChart(S.chart.broker);
+    else await ensureChart();
   }
 
   function updateAccountDock(account) {
@@ -751,9 +800,13 @@
     renderChartChrome,
     reloadLive: () => (S.chart.broker ? loadChart(S.chart.broker) : (clearChart(), setLamp("off", t("Offline")), renderChartChrome())),
     updateAccountDock,
+    openSettings,
+    afterRepair,
   };
 
   // ---- boot ---------------------------------------------------------------------
+
+  let setStopVisible = () => {};
 
   async function boot() {
     $("btnDensities").onclick = async () => {
@@ -823,13 +876,23 @@
       try {
         await invoke("observer_stop");
         log(t("AI stopped; open positions remain protected."), "warn");
+        setStopVisible(false);
       } catch (error) { log(`AI stop failed: ${error}`, "bad"); }
     };
     const stopButton = $("btnAiStop");
+    // Stop is shown only while the AI observer runs or protects a position.
+    const setStopVisibleImpl = (on) => {
+      stopButton.hidden = !on;
+      stopSlotRef?.style.setProperty("display", on ? "" : "none");
+    };
+    let stopSlotRef = null;
+    setStopVisible = setStopVisibleImpl;
     const stopSlot = document.createElement("span");
     stopSlot.className = "stop-slot";
     stopSlot.setAttribute("aria-hidden", "true");
     stopButton.replaceWith(stopSlot);
+    stopSlotRef = stopSlot;
+    setStopVisible(false);
     document.body.append(stopButton);
     const positionStop = () => {
       stopSlot.style.width = `${stopButton.offsetWidth}px`;
@@ -852,14 +915,16 @@
     $("btnBrokers").onclick = () => openPanel("brokers");
     $("btnDensities").textContent = densityButtonLabel();
     $("emptyConnect").onclick = () => (S.chart.error ? loadChart(S.chart.broker) : openPanel("brokers"));
-    document.querySelectorAll("[data-open]").forEach((b) => (b.onclick = () => openPanel(b.dataset.open)));
+    document.querySelectorAll("[data-open]").forEach((b) => (b.onclick = () => openPanel(b.dataset.open, b.dataset.tab)));
+    $("sheetDensities").onclick = () => { openSheet(false); $("btnDensities").click(); };
     document.querySelectorAll(".rail-item").forEach((b) => {
       b.onclick = () => (b.dataset.panel === "chart" ? closePanel() : openPanel(b.dataset.panel));
     });
 
     const saved = S.order.filter((id) => {
       const s = S.settings.brokers[id];
-      return s.auto_connect && (s.stored.length || Object.keys(s.values).length) && !S.sessions[id];
+      // Only complete saved forms: a half-filled form would log "MT5 login is empty" on every start.
+      return s.auto_connect && s.complete && !S.sessions[id];
     });
     saved.forEach((id) => (S.busy[id] = true));
     renderChartChrome();
@@ -867,20 +932,24 @@
     let accountRefreshBusy = false;
     setInterval(async () => {
       if (accountRefreshBusy) return;
-      if (!S.sessions.roboforex) { updateAccountDock(null); window.AEGIS.observer?.syncChartStatus({}); return; }
+      if (!S.sessions.roboforex) { updateAccountDock(null); window.AEGIS.observer?.syncChartStatus({}); setStopVisible(false); return; }
       accountRefreshBusy = true;
       try {
         const status = await invoke("observer_status");
         updateAccountDock(status.account);
         window.AEGIS.observer?.syncChartStatus(status);
+        setStopVisible(status.running || !!status.position);
       } catch {
         updateAccountDock(null);
       } finally {
         accountRefreshBusy = false;
       }
     }, 3000);
+    $("feedLamp").onclick = () => openSettings("diagnostics");
     await ensureChart();
     await Promise.all(saved.map(connectSaved));
+    // A quick (non-billable, no inference) check marks failing parts of the window at start.
+    window.AEGIS.diag?.runCheck({ deep: false }).catch(() => {});
   }
 
   boot().catch((err) => log(`Start failed: ${err}`, "bad"));

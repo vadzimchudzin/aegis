@@ -545,6 +545,38 @@ impl Connector {
         }
     }
 
+    /// MT5 bridge diagnostics (`None` for exchanges, which have no local terminal).
+    pub async fn mt5_health(&self) -> Option<Result<serde_json::Value, BrokerError>> {
+        match self {
+            Connector::Roboforex(c) => Some(c.health().await),
+            _ => None,
+        }
+    }
+
+    /// Re-opens the MT5 terminal link without a new login form.
+    pub async fn mt5_reinit(&self) -> Result<serde_json::Value, BrokerError> {
+        match self {
+            Connector::Roboforex(c) => c.reinit().await,
+            _ => Err(BrokerError::Input("only RoboForex MT5 has a terminal link".into())),
+        }
+    }
+
+    /// Pushes the application clock correction to the MT5 bridge.
+    pub async fn sync_clock(&self, correction_ms: i64) -> Result<(), BrokerError> {
+        match self {
+            Connector::Roboforex(c) => c.set_clock(correction_ms).await,
+            _ => Ok(()),
+        }
+    }
+
+    /// False when the MT5 bridge process has exited; exchanges are stateless HTTP.
+    pub async fn alive(&self) -> bool {
+        match self {
+            Connector::Roboforex(c) => c.alive().await,
+            _ => true,
+        }
+    }
+
     /// Releases the venue session (logs the MT5 terminal out and stops the bridge).
     pub async fn close(&self) {
         if let Connector::Roboforex(c) = self {

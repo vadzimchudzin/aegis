@@ -1,7 +1,7 @@
 use std::{
     path::PathBuf,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use aegis_core::{
@@ -22,10 +22,7 @@ use crate::AppState;
 const SETTINGS: &str = "__ai";
 const CANCELLED_BEFORE_SEND: &str = "Запрос отменён до отправки модели";
 fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+    aegis_core::clock::now_ms_u64() / 1000
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]

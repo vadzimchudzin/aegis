@@ -26,7 +26,7 @@
         </div>
         <div class="chrome-right">
           <button class="ghost" id="btnAiStop" type="button" title="Stop new decisions; open positions remain protected"><span data-i18n>Stop</span></button>
-          <span class="lamp" id="feedLamp" data-on="0" title="Offline"></span>
+          <button type="button" class="lamp" id="feedLamp" data-on="0" title="Offline" aria-label="Diagnostics"></button>
           <button class="cta" id="btnBrokers" type="button" data-i18n>Brokers</button>
           <button class="ghost-round" id="btnMenu" type="button" title="Menu" data-i18n-title>
             <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
@@ -45,6 +45,7 @@
           <button class="rail-item on" data-panel="chart" type="button"><span class="ico">⌂</span><span>AEGIS</span></button>
           <button class="rail-item" data-panel="brokers" type="button"><span class="ico">▣</span><span data-i18n>Brokers</span></button>
           <button class="rail-item" data-panel="theme" type="button"><span class="ico">⚙</span><span data-i18n>Settings</span></button>
+          <button class="rail-item" data-panel="diagnostics" type="button"><span class="ico">✚</span><span data-i18n>Diagnostics</span></button>
           <div class="rail-sep"></div>
           <div class="rail-label" data-i18n>Strategies</div>
           <div id="strategyList" class="strategy-list"></div>
@@ -86,7 +87,11 @@
     <div class="sheet-backdrop" id="backdrop" hidden></div>
     <aside class="sheet glass" id="sheet" hidden>
       <button class="row" data-open="brokers" type="button"><span data-i18n>Brokers</span><span class="row-ico">▣</span></button>
-      <button class="row" data-open="theme" type="button"><span data-i18n>Settings</span><span class="row-ico">▤</span></button>
+      <button class="row" data-open="theme" data-tab="trading" type="button"><span data-i18n>AI trading</span><span class="row-ico">◆</span></button>
+      <button class="row" data-open="theme" data-tab="models" type="button"><span data-i18n>Models</span><span class="row-ico">◎</span></button>
+      <button class="row" data-open="theme" data-tab="diagnostics" type="button"><span data-i18n>Diagnostics</span><span class="row-ico">✚</span></button>
+      <button class="row" data-open="theme" data-tab="appearance" type="button"><span data-i18n>Appearance</span><span class="row-ico">▤</span></button>
+      <button class="row" id="sheetDensities" type="button"><span data-i18n>Densities</span><span class="row-ico">▥</span></button>
       <button class="row danger" id="sheetClose" type="button"><span data-i18n>Close</span><span class="row-ico">✕</span></button>
     </aside>
 
@@ -110,5 +115,7 @@
     <script src="structural.js"></script>
     <script src="ai.js"></script>
     <link rel="stylesheet" href="ai.css">
+    <script src="diag.js"></script>
+    <link rel="stylesheet" href="diag.css">
   </body>
 </html>

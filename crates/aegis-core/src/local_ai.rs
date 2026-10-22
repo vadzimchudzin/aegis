@@ -762,6 +762,55 @@ impl Runtime {
         })
     }
 
+    /// Structured answer constrained by a JSON schema (used by the repair assistant). The
+    /// request stays within the 4096-token context: about 12 KB of prompt and system text.
+    pub async fn ask_json(&self, prompt: &str, system: &str, schema: &Value, tokens: u32) -> Result<Answer, String> {
+        if prompt.trim().is_empty() || prompt.len().saturating_add(system.len()) > 12_000 {
+            return Err("Diagnosis request exceeds the local context budget".into());
+        }
+        let at = Instant::now();
+        let response = http(Duration::from_secs(240))?
+            .post(format!("{}/api/chat", self.endpoint))
+            .json(&json!({
+                "model": MODEL, "stream": false, "think": false, "keep_alive": "10m", "format": schema,
+                "messages": [{"role":"system","content":system},{"role":"user","content":prompt}],
+                "options": {"num_ctx":4096,"num_predict":tokens,"temperature":0}
+            }))
+            .send()
+            .await
+            .map_err(|error| {
+                if error.is_connect() {
+                    format!(
+                        "local model server is not running on {}; press Start server in Settings → Models",
+                        self.endpoint
+                    )
+                } else {
+                    format!("Local model request failed: {error}")
+                }
+            })?;
+        let code = response.status();
+        let value: Value = response.json().await.map_err(|e| e.to_string())?;
+        if !code.is_success() || value["error"].is_string() {
+            return Err(format!(
+                "Ollama: {}",
+                value["error"].as_str().unwrap_or("Request failed")
+            ));
+        }
+        if value["done_reason"] == "length" {
+            return Err("Local model answer exceeded the token limit".into());
+        }
+        let response = value["message"]["content"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+            .ok_or("Ollama returned an empty answer")?
+            .to_owned();
+        Ok(Answer {
+            response,
+            elapsed_ms: at.elapsed().as_millis() as u64,
+            memories_used: 0,
+        })
+    }
+
     pub async fn ask(&self, prompt: &str, system: &str, memories_used: usize, tokens: u32) -> Result<Answer, String> {
         if prompt.trim().is_empty() || prompt.len() > 2000 {
             return Err("Enter a prompt of 1–2000 UTF-8 bytes".into());

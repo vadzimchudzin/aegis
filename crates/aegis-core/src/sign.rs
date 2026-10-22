@@ -1,5 +1,3 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
@@ -9,11 +7,10 @@ pub(crate) fn hmac_sha256_hex(secret: &str, payload: &str) -> String {
     hex::encode(mac.finalize().into_bytes())
 }
 
+/// Application clock (computer clock plus the measured correction), used for request
+/// signatures and quote freshness.
 pub(crate) fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+    crate::clock::now_ms()
 }
 
 #[cfg(test)]

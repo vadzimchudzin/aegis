@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.0-beta.10 — Full check, Repair, AI repair, Anthropic model choice
+
+- Observer issues are tracked per source and clear themselves after recovery (no permanent MT5 errors).
+- MT5 bridge re-opens a broken terminal IPC link (-10001…-10005) automatically; a dead bridge is restarted.
+- Closed market (daily break, weekend) is an amber notice; start waits for fresh quotes.
+- Full check, Repair (whitelisted actions only) and AI repair with local Qwen or OpenRouter Anthropic.
+- OpenRouter Anthropic model selection from the live catalog; Settings split into Appearance, AI trading, Models, Diagnostics.
+- CI/release produce the Windows installer only. See `docs/release-beta10.md`.
+
 ## 0.7.0-beta.9
 
 - Persistent optional MT5 server timestamp offset in the broker connection GUI, with explicit UTC/±hour choices; connection configuration overrides environment/UTC defaults, never inferred from ticks.

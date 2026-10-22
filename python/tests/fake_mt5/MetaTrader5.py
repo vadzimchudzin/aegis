@@ -50,11 +50,55 @@ _state = {
     "live_symbol": False,
     "balance": 1000.0,
     "freeze_level": 0,
+    "ipc_ok": True,
+    "control_seq": None,
+    "initialize_calls": 0,
 }
 
 
+def _control():
+    """Optional fault injection for desktop end-to-end tests (never used by unit tests).
+
+    AEGIS_FAKE_MT5_CONTROL points to a JSON file: {"break_ipc": <counter>, "terminal_closed": bool,
+    "connected": bool, "quote_age_seconds": number}. Increasing break_ipc breaks the IPC link once,
+    like a terminal restart; initialize() restores it unless terminal_closed is true.
+    """
+    path = os.getenv("AEGIS_FAKE_MT5_CONTROL")
+    if not path:
+        return {}
+    try:
+        import json
+        with open(path, encoding="utf-8") as stream:
+            data = json.load(stream)
+    except (OSError, ValueError):
+        return {}
+    if data.get("break_ipc") is not None and data.get("break_ipc") != _state["control_seq"]:
+        _state["control_seq"] = data.get("break_ipc")
+        _state["ipc_ok"] = False
+        _state["error"] = (-10001, "IPC send failed")
+    if "connected" in data:
+        _state["connected"] = bool(data["connected"])
+    if "quote_age_seconds" in data:
+        _state["quote_age_seconds"] = float(data["quote_age_seconds"])
+    return data
+
+
+def _ipc():
+    _control()
+    if not _state["ipc_ok"]:
+        _state["error"] = (-10001, "IPC send failed")
+    return _state["ipc_ok"]
+
+
 def initialize(path=None, login=None, password=None, server=None, timeout=None):
+    _state["initialize_calls"] += 1
+    control = _control()
+    if control.get("terminal_closed"):
+        _state["ipc_ok"] = False
+        _state["error"] = (-10003, "IPC initialize failed, MetaTrader 5 x64 not found")
+        return False
     if login in (1, 2) and password == "good":
+        _state["ipc_ok"] = True
         _state["logged_in"] = True
         _state["account_login"] = login
         _state["live_symbol"] = login == 2
@@ -73,6 +117,8 @@ def last_error():
 
 
 def account_info():
+    if not _ipc():
+        return None
     profit = sum(p.profit for p in _state["positions"])
     balance = float(_state["balance"])
     return SimpleNamespace(login=_state["account_login"], server="RoboForex-ECN", currency="USD", balance=balance, equity=balance + profit,
@@ -82,6 +128,8 @@ def account_info():
 
 
 def terminal_info():
+    if not _ipc():
+        return None
     return SimpleNamespace(connected=_state["connected"], trade_allowed=_state["trade_enabled"],
                            company="RoboForex Ltd", build=5120)
 
@@ -163,6 +211,8 @@ def symbol_select(name, enable):
 
 
 def symbol_info_tick(name):
+    if not _ipc():
+        return None
     now_ms = int((time.time() - _state["quote_age_seconds"]) * 1000) + SERVER_OFFSET * 1000
     return SimpleNamespace(time=now_ms // 1000, time_msc=now_ms, bid=4293.0, ask=4294.0, last=4293.5, volume=2,
                            volume_real=2.5)
@@ -179,6 +229,8 @@ def copy_ticks_from(symbol, date_from, count, flags):
 
 
 def copy_rates_from_pos(symbol, timeframe, start, count):
+    if not _ipc():
+        return None
     if not _state["logged_in"]:
         _state["error"] = (-10004, "No IPC connection")
         return None

@@ -91,6 +91,14 @@ impl LocalAiState {
         }
     }
 
+    /// Repair assistant: one schema-constrained answer from the local model.
+    pub async fn diagnose(&self, prompt: &str, system: &str, schema: &serde_json::Value) -> Result<Answer, String> {
+        let _op = self.begin("Diagnosing AEGIS problems")?;
+        let result = self.runtime.lock().await.ask_json(prompt, system, schema, 700).await;
+        self.result(&result);
+        result
+    }
+
     pub async fn observe(&self, prompt: &str, system: &str) -> Result<Answer, String> {
         let _op = self.begin("Autonomous XAUUSD observation")?;
         let result = self.runtime.lock().await.observe(prompt, system).await;
@@ -111,13 +119,13 @@ impl Drop for Operation<'_> {
 #[derive(Serialize)]
 pub struct LocalStatus {
     #[serde(flatten)]
-    runtime: Status,
-    progress: Progress,
+    pub(crate) runtime: Status,
+    pub(crate) progress: Progress,
     memory_count: usize,
     data_dir: String,
 }
 
-async fn status(state: &LocalAiState) -> Result<LocalStatus, String> {
+pub(crate) async fn status(state: &LocalAiState) -> Result<LocalStatus, String> {
     let mut runtime = Runtime::inspect(ENDPOINT).await;
     let disk = Runtime::new(state.root.clone());
     runtime.installed = disk.installed();

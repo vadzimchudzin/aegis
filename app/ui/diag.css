@@ -1,0 +1,81 @@
+/* Diagnostics, Repair, AI repair assistant and Models tab. Uses the theme variables only. */
+button.lamp { padding: 0; border: 0; cursor: pointer; }
+button.lamp:focus-visible { outline: 2px solid var(--apple); outline-offset: 3px; }
+
+.settings-tabs { flex-wrap: wrap; }
+.settings-tab { position: relative; min-width: 96px; }
+.tab-badge, .rail-item[data-panel="diagnostics"].has-fail::after {
+  display: inline-grid; place-items: center; min-width: 17px; height: 17px; margin-left: 6px; padding: 0 5px;
+  border-radius: 999px; background: var(--neg); color: #fff; font-size: 10px; font-weight: 700;
+}
+.rail-item[data-panel="diagnostics"].has-fail::after { content: attr(data-badge); margin-left: auto; }
+.rail-item[data-panel="diagnostics"].has-fail { color: var(--ink); }
+
+.dg { display: grid; gap: 12px; }
+.dg-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.dg-row .obs-label { flex: 1 1 260px; margin: 0; }
+.dg-paid { font-size: 12px; color: var(--muted); }
+.dg-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; margin-top: 10px; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--hair); background: var(--fill); font-size: 12px; }
+.dg-summary span { color: var(--muted); }
+.dg-summary.dg-fail { border-color: color-mix(in srgb, var(--neg) 55%, transparent); background: color-mix(in srgb, var(--neg) 10%, transparent); }
+.dg-summary.dg-warn { border-color: color-mix(in srgb, var(--warn) 55%, transparent); background: color-mix(in srgb, var(--warn) 10%, transparent); }
+.dg-summary.dg-ok { border-color: color-mix(in srgb, var(--pos) 45%, transparent); }
+.dg-counts { display: flex; gap: 6px; margin-left: auto; }
+.dg-pill { padding: 2px 8px; border-radius: 999px; background: var(--fill-strong); font-weight: 600; color: var(--ink); }
+.dg-pill.dg-fail { color: var(--neg); }
+.dg-pill.dg-warn { color: var(--warn); }
+.dg-pill.dg-ok { color: var(--pos); }
+
+.dg-group h3 { display: flex; align-items: center; gap: 8px; }
+.dg-group-fail { border-color: color-mix(in srgb, var(--neg) 45%, var(--hair)); }
+.dg-group-warn { border-color: color-mix(in srgb, var(--warn) 40%, var(--hair)); }
+.dg-item { display: grid; grid-template-columns: 22px 1fr; gap: 10px; padding: 10px 0; border-top: 1px solid var(--hair); }
+.dg-group .dg-item:first-of-type { border-top: 0; }
+.dg-ico { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 999px; background: var(--fill-strong); font-size: 12px; font-weight: 700; }
+.dg-ok .dg-ico { color: var(--pos); }
+.dg-skip .dg-ico, .dg-skip .dg-head strong { color: var(--muted); }
+.dg-warn .dg-ico { color: #1b1300; background: var(--warn); }
+.dg-fail .dg-ico { color: #fff; background: var(--neg); }
+.dg-item.dg-fail { margin: 4px -10px; padding: 10px; border: 1px solid color-mix(in srgb, var(--neg) 60%, transparent); border-radius: 12px; background: color-mix(in srgb, var(--neg) 9%, transparent); }
+.dg-item.dg-warn { margin: 4px -10px; padding: 10px; border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent); border-radius: 12px; background: color-mix(in srgb, var(--warn) 7%, transparent); }
+.dg-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 10px; }
+.dg-state { color: var(--muted); font-size: 11px; }
+.dg-text { margin: 4px 0 0; font-size: 12px; line-height: 1.45; }
+.dg-detail { margin: 4px 0 0; color: var(--muted); font-size: 11px; word-break: break-word; }
+.dg-fix { margin: 6px 0 0; font-size: 12px; line-height: 1.45; }
+.dg-fail .dg-fix b { color: var(--neg); }
+.dg-warn .dg-fix b { color: var(--warn); }
+.dg-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.dg-compact { grid-template-columns: 18px 1fr; margin: 6px 0 !important; }
+.dg-compact .dg-ico { width: 18px; height: 18px; font-size: 10px; }
+.dg-steps { display: grid; gap: 4px; margin-top: 8px; font-size: 12px; }
+.dg-step.dg-ok b { color: var(--pos); }
+.dg-step.dg-fail b { color: var(--neg); }
+.dg-error, .dg-warn-text { color: var(--warn); }
+.dg-ai-result { margin-top: 12px; padding: 12px; border-radius: 12px; background: var(--fill); }
+.dg-ai-result h4 { margin: 10px 0 6px; font-size: 13px; }
+.dg-ai-result h4:first-child { margin-top: 0; }
+.dg-ai-result h4 small { color: var(--muted); font-weight: 400; }
+.dg-ai-result p, .dg-ai-result li { font-size: 12px; line-height: 1.5; }
+.dg-ai-actions { display: grid; gap: 6px; margin-bottom: 10px; }
+
+.obs-run-actions { flex-wrap: wrap; }
+.obs-run-tools { display: inline-flex; flex-wrap: wrap; gap: 8px; margin-left: auto; }
+.obs-quick-health:empty { display: none; }
+.obs-quick-health { margin-top: 10px; }
+.obs-status-warn { display: block; margin-top: 4px; color: var(--warn); font-size: 12px; }
+
+/* Cause highlight: pulses the element that explains a failing check. */
+.hl-cause { position: relative; animation: dg-pulse 1.2s ease-in-out 4; outline: 2px solid var(--neg); outline-offset: 3px; border-radius: 14px; }
+.broker-dot.hl-fail { box-shadow: 0 0 0 2px var(--neg); border-radius: 999px; }
+@keyframes dg-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--neg) 0%, transparent); }
+  50% { box-shadow: 0 0 0 8px color-mix(in srgb, var(--neg) 30%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) { .hl-cause { animation: none; } }
+
+.dg-confirm { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; background: var(--backdrop); }
+.dg-confirm-box { max-width: 420px; margin: 16px; padding: 18px; border-radius: 20px; background: var(--panel); box-shadow: var(--shadow); }
+.dg-confirm-box p { margin: 0 0 14px; line-height: 1.45; }
+.dg-models { display: grid; gap: 12px; }
+.dg-models .settings-local-ai { margin-top: 0; padding-top: 14px; border-top: 1px solid var(--hair); }

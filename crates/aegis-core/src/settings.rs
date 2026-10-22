@@ -59,6 +59,9 @@ pub struct Settings {
     pub strategies: BTreeMap<String, serde_json::Value>,
     #[serde(default)]
     ai_key: Option<String>,
+    /// OpenRouter model id of the Anthropic family chosen in Settings → Models.
+    #[serde(default)]
+    pub ai_model: Option<String>,
 }
 
 fn default_theme() -> String {
@@ -79,6 +82,7 @@ impl Default for Settings {
             brokers: BTreeMap::new(),
             strategies: BTreeMap::new(),
             ai_key: None,
+            ai_model: None,
         }
     }
 }
@@ -94,6 +98,8 @@ pub struct PublicBroker {
     pub last_report: Option<ConnectReport>,
     /// A stored value could not be decrypted (file copied from another computer).
     pub unreadable: bool,
+    /// Every required field is stored, so a saved connection can be attempted.
+    pub complete: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -222,8 +228,32 @@ impl SettingsStore {
         self.data.brokers.entry(id).or_default()
     }
 
+    /// True when every required field of the broker is stored and readable. A partly filled
+    /// form (for example only the MT5 server) is not a saved connection: auto-connect would
+    /// only log "MT5 login is empty" on every start.
     pub fn has_credentials(&self, id: BrokerId) -> bool {
-        self.broker(id).is_some_and(|b| !b.fields.is_empty())
+        if self.broker(id).is_none_or(|b| b.fields.is_empty()) {
+            return false;
+        }
+        let plain = self.credentials(id);
+        id.info()
+            .fields
+            .iter()
+            .filter(|f| !f.optional)
+            .all(|f| plain.get(f.key).is_some_and(|v| !v.trim().is_empty()))
+    }
+
+    /// Settings could not be decrypted with this computer's key.
+    pub fn key_error(&self) -> Option<&str> {
+        self.key_error.as_deref()
+    }
+
+    pub fn ai_model(&self) -> Option<String> {
+        self.data.ai_model.clone()
+    }
+
+    pub fn set_ai_model(&mut self, model: Option<String>) {
+        self.data.ai_model = model;
     }
 
     /// Decrypted fields. Values that cannot be decrypted are left out.
@@ -259,6 +289,25 @@ impl SettingsStore {
         let encrypted = merged.iter().map(|(k, v)| (k.clone(), self.encrypt(v))).collect();
         self.entry(id).fields = encrypted;
         merged
+    }
+
+    /// Updates one non-secret field (for example the MT5 server clock offset) and keeps the
+    /// rest of the stored form. `None` removes the field.
+    pub fn set_plain_field(&mut self, id: BrokerId, key: &str, value: Option<&str>) -> Result<(), String> {
+        if id.is_secret(key) || !id.info().fields.iter().any(|f| f.key == key) {
+            return Err(format!("{key} is not a plain {} field", id.name()));
+        }
+        let encrypted = value.map(|v| self.encrypt(v.trim()));
+        let entry = self.entry(id);
+        match encrypted {
+            Some(v) => {
+                entry.fields.insert(key.into(), v);
+            }
+            None => {
+                entry.fields.remove(key);
+            }
+        }
+        Ok(())
     }
 
     pub fn set_auto_connect(&mut self, id: BrokerId, on: bool) {
@@ -298,6 +347,7 @@ impl SettingsStore {
                     auto_connect: stored.auto_connect,
                     last_report: stored.last_report,
                     unreadable: plain.len() < stored.fields.len(),
+                    complete: self.has_credentials(id),
                 };
                 (id, broker)
             })
@@ -509,6 +559,31 @@ mod tests {
 
     fn form(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn partial_forms_are_not_saved_connections() {
+        let path = std::env::temp_dir().join(format!("aegis-partial-{}.json", std::process::id()));
+        let mut store = SettingsStore::open_with_key(&path, [3; 32]);
+        store.apply_form(
+            BrokerId::Roboforex,
+            &BTreeMap::from([("server".into(), "RoboForex-ECN".into())]),
+        );
+        assert!(!store.has_credentials(BrokerId::Roboforex));
+        assert!(!store.public().brokers[&BrokerId::Roboforex].complete);
+        store.apply_form(
+            BrokerId::Roboforex,
+            &BTreeMap::from([
+                ("login".into(), "1".into()),
+                ("password".into(), "x".into()),
+                ("server".into(), "RoboForex-ECN".into()),
+            ]),
+        );
+        assert!(store.has_credentials(BrokerId::Roboforex));
+        assert!(store.public().brokers[&BrokerId::Roboforex].complete);
+        store.set_ai_model(Some("anthropic/claude-sonnet-4.5".into()));
+        assert_eq!(store.ai_model().as_deref(), Some("anthropic/claude-sonnet-4.5"));
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

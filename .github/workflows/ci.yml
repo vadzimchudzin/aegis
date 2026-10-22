@@ -31,3 +31,39 @@ jobs:
         working-directory: app
       - run: python -m unittest discover -s tests -v
         working-directory: python
+
+  # Every push to main produces a downloadable Windows installer (Actions → run → Artifacts).
+  windows-installer:
+    needs: test
+    if: github.event_name == 'push'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Windows tests
+        run: cargo test --workspace --locked
+        timeout-minutes: 20
+        env:
+          AEGIS_TEST_PYTHON: python
+      - run: python -m unittest discover -s tests -v
+        working-directory: python
+      - run: npm ci
+        working-directory: app
+      - run: npm test
+        working-directory: app
+      - name: Build NSIS installer
+        run: npx tauri build --bundles nsis
+        working-directory: app
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AEGIS-windows-installer
+          path: target/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error
+          retention-days: 30

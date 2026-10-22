@@ -150,6 +150,29 @@
       <div class="obs-actions"><button class="cta" type="submit" data-action="save" ${disabled}>${esc(text("save"))}</button><button class="ghost" type="button" data-action="defaults" ${disabled}>${esc(text("defaults"))}</button><span class="obs-inline-error" data-form-error role="alert"></span></div>
     </form>`;
   }
+  function diagText(key) {
+    return window.AEGIS?.diag?.tr(key) || key;
+  }
+  /** Compact result of the last full check inside the status card (the cause, highlighted). */
+  function paintQuickHealth() {
+    const node = document.querySelector(".obs-root [data-quick-health]");
+    if (!node) return;
+    const diag = window.AEGIS?.diag;
+    const report = diag?.state?.report;
+    const busy = diag?.state?.busy;
+    document.querySelectorAll('.obs-root [data-action="full-check"], .obs-root [data-action="repair"]').forEach((button) => { button.disabled = !!busy; });
+    if (!report) { node.innerHTML = busy ? `<p class="obs-muted">${esc(diagText("running"))}</p>` : ""; return; }
+    const bad = report.items.filter((item) => item.status === "fail" || item.status === "warn").slice(0, 4);
+    const head = report.counts.fail ? diagText("has_fail").replace("{n}", report.counts.fail) : report.counts.warn ? diagText("has_warn").replace("{n}", report.counts.warn) : diagText("all_ok");
+    node.innerHTML = `<div class="dg-summary dg-${esc(report.overall)}"><strong>${esc(busy ? diagText("running") : head)}</strong></div>${bad.map((item) => {
+      const t = diag.itemText(item);
+      return `<div class="dg-item dg-${esc(item.status)} dg-compact"><span class="dg-ico">${item.status === "fail" ? "✕" : "!"}</span><div class="dg-body"><strong>${esc(t.title)}</strong><p class="dg-text">${esc(t.text)}</p>${t.fix ? `<p class="dg-fix">${esc(t.fix)}</p>` : ""}</div></div>`;
+    }).join("")}${bad.length ? `<button type="button" class="ghost sm" data-action="open-diagnostics">${esc(diagText("diagnostics"))} →</button>` : ""}`;
+  }
+  function issueText(issue) {
+    if (issue.source === "market" && String(issue.message).startsWith("Market closed")) return diagText("market_closed");
+    return issue.message;
+  }
   function field(label, value) {
     return `<div class="obs-metric"><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`;
   }
@@ -302,8 +325,17 @@
     const moneyState = root.querySelector("[data-money-status]");
     if (moneyState) moneyState.textContent = state.config?.mode === "money" ? (status.money_armed ? text("Real-money execution is armed for this session.") : text("Real-money mode is disarmed. Confirm it again before starting.")) : text("Paper simulation mode.");
     const stateNode = root.querySelector("[data-status-line]");
-    const statusError = status.error || state.error;
-    if (stateNode) stateNode.innerHTML = `<span class="obs-status-dot ${running ? "is-running" : ""}"></span><strong>${esc(phase)}</strong>${statusError ? `<span class="obs-status-error">${esc(statusError)}</span>` : ""}`;
+    const issues = Array.isArray(status.issues) && status.issues.length ? status.issues : status.error ? [{ source: "", message: status.error }] : [];
+    const lines = issues.map((issue) => {
+      const closed = issue.source === "market" && String(issue.message).startsWith("Market closed");
+      return `<span class="${closed ? "obs-status-warn" : "obs-status-error"}">${esc(issueText(issue))}</span>`;
+    });
+    if (state.error) lines.push(`<span class="obs-status-error">${esc(state.error)}</span>`);
+    if (stateNode) stateNode.innerHTML = `<span class="obs-status-dot ${running ? "is-running" : ""}"></span><strong>${esc(phase)}</strong>${lines.join("")}`;
+    // A click error (for example "Connect RoboForex MT5 in Brokers first") is a one-time
+    // answer: it disappears when the observer runs or after 20 seconds, never stays forever.
+    const actionError = root.querySelector("[data-action-error]");
+    if (actionError && actionError.textContent && (running || Date.now() - (state.actionErrorAt || 0) > 20000)) actionError.textContent = "";
     const action = root.querySelector('[data-action="run"]');
     if (action) {
       action.textContent = running ? text("stop") : text(state.config?.mode === "money" ? "Start Money trading" : "Start Paper trading");
@@ -460,6 +492,9 @@
       if (!button || button.disabled) return;
       const action = button.dataset.action;
       if (action === "refresh") return refreshStatus(root, state);
+      if (action === "full-check") { window.AEGIS?.diag?.runCheck({ deep: true }).catch(() => {}); return; }
+      if (action === "repair") { window.AEGIS?.diag?.repair(null).then(() => refreshStatus(root, state)).catch(() => {}); return; }
+      if (action === "open-diagnostics") return window.AEGIS?.openSettings?.("diagnostics");
       if (action === "edit-strategy") return window.AEGIS?.openPanel?.("observer_strategy", button.dataset.strategyId);
       if (action === "provider-save") {
         const key = root.querySelector("[data-provider-key]").value.trim();
@@ -545,9 +580,9 @@
             state.status = await invoke("observer_start");
           }
         } catch (error) {
-          state.error = String(error?.message || error);
           const node = root.querySelector("[data-action-error]");
-          if (node) node.textContent = state.error;
+          state.actionErrorAt = Date.now();
+          if (node) node.textContent = String(error?.message || error);
         } finally {
           state.busy = false;
           updateStatus(root, state);
@@ -595,23 +630,22 @@
       STATES.set(root, state);
       root.innerHTML = `<div class="obs-heading"><div><span class="obs-kicker">AI SETTINGS</span><h2>${esc(text("AI settings"))}</h2><p>${esc(text("intro"))}</p></div><button class="ghost sm" type="button" data-action="refresh">${esc(text("refresh"))}</button></div>
         <div class="obs-safety" role="note">${esc(text("no_orders"))}</div><p class="obs-help obs-stop-note">${esc(text("stop_protect"))}</p><p class="obs-preflight" data-preflight>${esc(text("preflight"))}</p><p class="obs-help" data-money-status>${esc(text("Paper simulation mode."))}</p>
-        <section class="obs-card obs-status-card"><div class="obs-status-line" data-status-line role="status" aria-live="polite"><span class="obs-status-dot"></span><strong>${esc(text("loading"))}</strong></div><div class="obs-actions obs-run-actions"><button class="cta" type="button" data-action="run" data-run="start" disabled>${esc(text("start"))}</button><button class="ghost" type="button" data-action="journal">${esc(text("journal"))}</button><span class="obs-inline-error" data-action-error role="alert"></span></div></section>
+        <section class="obs-card obs-status-card"><div class="obs-status-line" data-status-line role="status" aria-live="polite"><span class="obs-status-dot"></span><strong>${esc(text("loading"))}</strong></div><div class="obs-actions obs-run-actions"><button class="cta" type="button" data-action="run" data-run="start" disabled>${esc(text("start"))}</button><button class="ghost" type="button" data-action="journal">${esc(text("journal"))}</button><span class="obs-run-tools"><button class="ghost" type="button" data-action="full-check">${esc(diagText("run"))}</button><button class="ghost dg-repair" type="button" data-action="repair">${esc(diagText("repair"))}</button></span></div><span class="obs-inline-error" data-action-error role="alert"></span><div class="obs-quick-health" data-quick-health></div></section>
         <div data-config-form><p class="obs-muted">${esc(text("loading"))}</p></div>
-        <section class="obs-card obs-provider"><h3>${esc(text("OpenRouter provider"))}</h3><p class="obs-help">${esc(text("No spend limits are configured here. Provider charges depend on your OpenRouter account."))}</p><label class="obs-label">${esc(text("API key"))}<input type="password" autocomplete="new-password" data-provider-key placeholder="${esc(text("Leave empty to keep the stored key"))}"></label><label class="obs-label">${esc(text("Model"))}<select data-provider-model><option value="anthropic/claude-fable-5">Fable5</option></select></label><div class="obs-actions"><button type="button" class="ghost" data-action="provider-save">${esc(text("Save provider"))}</button><button type="button" class="ghost" data-action="provider-test">${esc(text("Test provider"))}</button><span data-provider-state>${esc(text("Provider status will appear here."))}</span></div><div class="obs-inline-error" data-provider-message role="status"></div></section>
-        <section class="obs-card"><div class="obs-section-head"><h3>${esc(text("Diagnostics"))}</h3><button type="button" class="ghost sm" data-action="diagnostics">${esc(text("Run readiness checks"))}</button></div><p class="obs-help">${esc(text("Checks MT5 and model readiness without placing an order. Includes a billable provider API ping; confirmation is required."))}</p><div data-diagnostics></div></section>
         <section class="obs-card" data-account><h3>${esc(text("RoboForex account"))}</h3></section>
         <section class="obs-card" data-quote><h3>${esc(text("quote"))}</h3><p class="obs-muted">${esc(text("no_sample"))}</p></section>
         <section class="obs-card" data-frames><h3>${esc(text("frames_live"))}</h3></section><section class="obs-card" data-decision><h3>${esc(text("decision"))}</h3></section>
         <section class="obs-card" data-position><h3>${esc(text("position"))}</h3></section><section class="obs-card" data-stats><h3>${esc(text("stats"))}</h3></section>`;
       bind(root, state);
       load(root, state);
+      paintQuickHealth();
     } else if (focus) {
       root.querySelector(`[data-strategy="${CSS.escape(focus)}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" });
     }
     if (state?.timer) clearInterval(state.timer);
     if (state) {
       state.timer = setInterval(() => {
-        if (!root.isConnected || (window.AEGIS?.S?.panel && window.AEGIS.S.panel !== "observer" && !(window.AEGIS.S.panel === "theme" && window.AEGIS.S.settingsTab === "ai"))) {
+        if (!root.isConnected || (window.AEGIS?.S?.panel && window.AEGIS.S.panel !== "observer" && !(window.AEGIS.S.panel === "theme" && window.AEGIS.S.settingsTab === "trading"))) {
           clearInterval(state.timer); state.timer = null; return;
         }
         refreshStatus(root, state);
@@ -676,5 +710,5 @@
   }
   function render(container, focus) { return renderSettings(container, focus); }
   window.AEGIS = window.AEGIS || {};
-  window.AEGIS.observer = { render, renderSettings, renderStrategy, syncChartStatus, isEnabled: async () => { try { return !!(await invoke("observer_info")).config?.ai_enabled; } catch { return false; } } };
+  window.AEGIS.observer = { render, renderSettings, renderStrategy, syncChartStatus, paintQuickHealth, isEnabled: async () => { try { return !!(await invoke("observer_info")).config?.ai_enabled; } catch { return false; } } };
 })();

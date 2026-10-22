@@ -6,7 +6,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use aegis_core::{
@@ -22,10 +22,7 @@ use tokio::sync::Mutex;
 use crate::AppState;
 
 pub fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
+    aegis_core::clock::now_ms_u64()
 }
 
 #[derive(Clone, Serialize)]

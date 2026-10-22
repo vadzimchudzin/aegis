@@ -7,6 +7,7 @@ pub mod ai_provider;
 pub mod bounce;
 pub mod broker;
 pub mod checks;
+pub mod clock;
 pub mod density;
 pub mod event_archive;
 pub mod event_cycle;
