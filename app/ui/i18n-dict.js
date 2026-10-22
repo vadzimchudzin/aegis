@@ -2,6 +2,10 @@
 // Russian and Kazakh translations, keyed by the English source text (see i18n.js).
 window.I18N_DICT = {
  "ru": {
+  "AI trading": "AI-торговля",
+  "Models": "Модели",
+  "Densities": "Плотности",
+  "Automatic recovery": "Автовосстановление",
   "MT5 server clock offset": "Смещение времени сервера MT5",
   "Confirmed broker timestamp offset from UTC, in seconds (-50400 to +50400). Blank uses environment/UTC; 0 forces UTC. Your local timezone (including UTC+5) is unrelated. Confirm with your broker, then reconnect.": "Подтверждённое смещение меток времени брокера от UTC в секундах (от -50400 до +50400). Пусто — переменная окружения/UTC; 0 — строго UTC. Ваш местный часовой пояс (включая UTC+5) не связан с этим параметром. Уточните у брокера и переподключитесь.",
   "Environment / UTC default (not auto-detected)": "Переменная окружения / UTC (без автоопределения)",
@@ -567,6 +571,10 @@ window.I18N_DICT = {
   "Density eaten": "Плотность разобрали"
  },
  "kk": {
+  "AI trading": "ЖИ сауда",
+  "Models": "Модельдер",
+  "Densities": "Тығыздықтар",
+  "Automatic recovery": "Автоматты қалпына келтіру",
   "MT5 server clock offset": "MT5 сервері уақытының ығысуы",
   "Confirmed broker timestamp offset from UTC, in seconds (-50400 to +50400). Blank uses environment/UTC; 0 forces UTC. Your local timezone (including UTC+5) is unrelated. Confirm with your broker, then reconnect.": "Брокер растаған уақыт белгілерінің UTC-ден ығысуы, секундпен (-50400 пен +50400 аралығы). Бос болса — орта айнымалысы/UTC; 0 — тек UTC. Жергілікті уақыт белдеуі (UTC+5 қоса) бұған қатысы жоқ. Брокерден растап, қайта қосылыңыз.",
   "Environment / UTC default (not auto-detected)": "Орта айнымалысы / UTC (автоанықтау жоқ)",

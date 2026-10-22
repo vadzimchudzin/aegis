@@ -3,11 +3,7 @@
 //! No function in this module places or forwards real orders. Quantities are
 //! units of the asset, not broker lots.
 
-use std::{
-    collections::VecDeque,
-    net::IpAddr,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::{collections::VecDeque, net::IpAddr, time::Duration};
 
 use reqwest::{header, Url};
 use serde::{Deserialize, Serialize};
@@ -747,10 +743,11 @@ fn daily_pnl(state: &PaperState, snapshot: &Snapshot) -> f64 {
 }
 
 fn unix_now() -> Result<u64, String> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .map_err(|_| "system clock is before Unix epoch".into())
+    let now = crate::clock::now_ms();
+    if now <= 0 {
+        return Err("system clock is before Unix epoch".into());
+    }
+    Ok(now as u64 / 1000)
 }
 
 fn validate_local_url(endpoint: &str) -> Result<(), String> {

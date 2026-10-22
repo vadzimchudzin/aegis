@@ -182,6 +182,7 @@ impl Mt5Bridge {
         if let Some(offset) = server_offset_seconds {
             req["server_offset_seconds"] = json!(offset);
         }
+        req["clock_correction_ms"] = json!(crate::clock::correction_ms());
         let result = self.request(req, CONNECT_TIMEOUT).await?;
         let symbol = result["symbol"]
             .as_str()
@@ -328,6 +329,31 @@ impl Mt5Bridge {
             )
             .await?;
         serde_json::from_value(result).map_err(|e| BrokerError::Parse(format!("MT5 stop update: {e}")))
+    }
+
+    /// Read-only terminal link, account and quote report for the full check.
+    pub(crate) async fn health(&self) -> Result<Value, BrokerError> {
+        self.request(json!({"cmd": "health"}), REQUEST_TIMEOUT).await
+    }
+
+    /// Re-opens the terminal link with the stored login (explicit repair).
+    pub(crate) async fn reinit(&self) -> Result<Value, BrokerError> {
+        self.request(json!({"cmd": "reinit"}), CONNECT_TIMEOUT).await
+    }
+
+    /// Shares the application clock correction with the bridge so its timestamps agree.
+    pub(crate) async fn set_clock(&self, correction_ms: i64) -> Result<(), BrokerError> {
+        self.request(
+            json!({"cmd": "set_clock", "clock_correction_ms": correction_ms}),
+            REQUEST_TIMEOUT,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// True while the Python process is alive.
+    pub(crate) async fn alive(&self) -> bool {
+        matches!(self.io.lock().await.child.try_wait(), Ok(None))
     }
 
     pub(crate) async fn shutdown(&self) {

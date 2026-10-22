@@ -5,7 +5,7 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Mutex as StdMutex,
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use aegis_core::{
@@ -22,11 +22,9 @@ use tokio::sync::{watch, Mutex};
 
 use crate::{local_ai_cmd::LocalAiState, AppState};
 
+/// Application clock: computer time plus the correction measured by the full check.
 fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
+    aegis_core::clock::now_ms_u64()
 }
 
 fn agree(local: &ModelDecision, cloud: &ModelDecision) -> Result<(), String> {
@@ -42,38 +40,47 @@ fn agree(local: &ModelDecision, cloud: &ModelDecision) -> Result<(), String> {
 
 #[derive(Clone, Serialize)]
 pub struct LastDecision {
-    strategy_id: String,
-    decision: ModelDecision,
-    accepted: bool,
-    reason: String,
-    elapsed_ms: u64,
+    pub(crate) strategy_id: String,
+    pub(crate) decision: ModelDecision,
+    pub(crate) accepted: bool,
+    pub(crate) reason: String,
+    pub(crate) elapsed_ms: u64,
+}
+
+/// One active problem and the subsystem that reported it. Each source clears its own issue
+/// as soon as it succeeds again, so an old MT5 error never outlives the recovery.
+#[derive(Clone, Serialize)]
+pub struct Issue {
+    pub(crate) source: String,
+    pub(crate) message: String,
 }
 
 #[derive(Clone, Serialize)]
 pub struct ObserverStatus {
-    running: bool,
-    phase: String,
-    error: Option<String>,
-    sample: Option<MarketSample>,
-    frames: Vec<FrameSummary>,
-    last_decision: Option<LastDecision>,
-    decisions: u64,
-    outcomes: u64,
-    position: Option<PaperPosition>,
-    equity: f64,
-    journal_path: String,
-    account: Option<TradingState>,
-    money_armed: bool,
-    diagnostics: Vec<Diagnostic>,
-    provider_ready: bool,
+    pub(crate) running: bool,
+    pub(crate) phase: String,
+    pub(crate) error: Option<String>,
+    pub(crate) issues: Vec<Issue>,
+    pub(crate) sample: Option<MarketSample>,
+    pub(crate) frames: Vec<FrameSummary>,
+    pub(crate) last_decision: Option<LastDecision>,
+    pub(crate) decisions: u64,
+    pub(crate) outcomes: u64,
+    pub(crate) position: Option<PaperPosition>,
+    pub(crate) equity: f64,
+    pub(crate) journal_path: String,
+    pub(crate) account: Option<TradingState>,
+    pub(crate) money_armed: bool,
+    pub(crate) diagnostics: Vec<Diagnostic>,
+    pub(crate) provider_ready: bool,
 }
 
 #[derive(Clone, Serialize)]
 pub struct Diagnostic {
-    name: String,
-    ok: bool,
-    latency_ms: u64,
-    detail: String,
+    pub(crate) name: String,
+    pub(crate) ok: bool,
+    pub(crate) latency_ms: u64,
+    pub(crate) detail: String,
 }
 
 struct Inner {
@@ -86,6 +93,48 @@ struct Inner {
     account_identity: Option<(u64, String)>,
     daily_day: u64,
     daily_equity: f64,
+    issues: std::collections::BTreeMap<&'static str, String>,
+}
+
+/// Issue sources. `recovery` is cleared only by reconciling the journal, never by Repair.
+const ISSUE_RECOVERY: &str = "recovery";
+const ISSUE_ACCOUNT: &str = "account";
+const ISSUE_MARKET: &str = "market";
+const ISSUE_FRAMES: &str = "frames";
+const ISSUE_EVENTS: &str = "events";
+const ISSUE_JOURNAL: &str = "journal";
+const ISSUE_DECISION: &str = "decision";
+
+fn set_issue(inner: &mut Inner, source: &'static str, value: Option<String>) {
+    match value {
+        Some(message) => {
+            inner.issues.insert(source, message);
+        }
+        None => {
+            inner.issues.remove(source);
+        }
+    }
+    inner.status.issues = inner
+        .issues
+        .iter()
+        .map(|(source, message)| Issue {
+            source: (*source).into(),
+            message: message.clone(),
+        })
+        .collect();
+    inner.status.error = if inner.issues.is_empty() {
+        None
+    } else {
+        Some(inner.issues.values().cloned().collect::<Vec<_>>().join(" · "))
+    };
+}
+
+/// Clears transient issues (market, frames, decisions). Account and recovery issues stay
+/// until their own check succeeds or the journal is reconciled.
+fn clear_transient(inner: &mut Inner) {
+    for source in [ISSUE_MARKET, ISSUE_FRAMES, ISSUE_DECISION, ISSUE_JOURNAL] {
+        set_issue(inner, source, None);
+    }
 }
 
 pub struct ObserverState {
@@ -106,8 +155,19 @@ pub struct Info {
     config: ObserverConfig,
     defaults: ObserverConfig,
     status: ObserverStatus,
-    provider_model: &'static str,
+    provider_model: String,
     provider_key_stored: bool,
+}
+
+/// Selected OpenRouter model (Anthropic family) or the default.
+pub(crate) async fn selected_model(app: &AppHandle) -> String {
+    app.state::<AppState>()
+        .settings
+        .lock()
+        .await
+        .ai_model()
+        .filter(|m| aegis_core::ai_provider::validate_model(m).is_ok())
+        .unwrap_or_else(|| aegis_core::ai_provider::ANTHROPIC_MODEL.into())
 }
 
 fn write_json(path: &std::path::Path, value: &impl Serialize) -> Result<(), String> {
@@ -215,7 +275,8 @@ impl ObserverState {
         let status = ObserverStatus {
             running: false,
             phase: "Stopped; simulation only".into(),
-            error: recovery_error.clone(),
+            error: None,
+            issues: Vec::new(),
             sample: None,
             frames: Vec::new(),
             last_decision: None,
@@ -230,18 +291,21 @@ impl ObserverState {
             provider_ready: false,
         };
         let (changed, _) = watch::channel(0);
+        let mut inner = Inner {
+            events: None,
+            config,
+            sim,
+            journal,
+            status,
+            recovery_error: recovery_error.clone(),
+            account_identity: None,
+            daily_day,
+            daily_equity,
+            issues: Default::default(),
+        };
+        set_issue(&mut inner, ISSUE_RECOVERY, recovery_error);
         Self {
-            inner: Mutex::new(Inner {
-                events: None,
-                config,
-                sim,
-                journal,
-                status,
-                recovery_error,
-                account_identity: None,
-                daily_day,
-                daily_equity,
-            }),
+            inner: Mutex::new(inner),
             running: AtomicBool::new(false),
             epoch: AtomicU64::new(0),
             sequence: AtomicU64::new(now_ms()),
@@ -281,7 +345,7 @@ pub async fn observer_info(app: AppHandle, state: State<'_, ObserverState>) -> R
         config: inner.config.clone(),
         defaults: ObserverConfig::default(),
         status: inner.status.clone(),
-        provider_model: "anthropic/claude-fable-5",
+        provider_model: selected_model(&app).await,
         provider_key_stored: app.state::<AppState>().settings.lock().await.ai_key().is_some(),
     })
 }
@@ -344,8 +408,16 @@ pub async fn observer_start(app: AppHandle, state: State<'_, ObserverState>) -> 
     let _execution = state.execution.lock().await;
     let appstate = app.state::<AppState>();
     let connector = connector(&appstate).await?;
-    let sample = connector.market_sample().await.map_err(|e| e.to_string())?;
-    sample.validate(now_ms())?;
+    // A closed market (daily break, weekend) is not a fault: start and wait for quotes. New
+    // entries still require a fresh validated sample. A future timestamp stays a hard error.
+    let sample = match connector.market_sample().await {
+        Ok(sample) => {
+            sample.validate(now_ms())?;
+            Some(sample)
+        }
+        Err(error) if error.to_string().contains("stale") => None,
+        Err(error) => return Err(error.to_string()),
+    };
     let model = Runtime::inspect(ENDPOINT).await;
     if !model.server_ready || !model.model_downloaded {
         return Err("Install Qwen and press Start server in Local AI first".into());
@@ -393,11 +465,23 @@ pub async fn observer_start(app: AppHandle, state: State<'_, ObserverState>) -> 
         &mut inner,
         json!({"schema_version":1,"kind":"start","at_ms":now_ms(),"config":config,"sim_state":sim,"source":"RoboForex MT5 XAUUSD","mode":config.mode}),
     )?;
-    inner.status.sample = Some(sample);
+    let waiting = sample.is_none();
+    inner.status.sample = sample;
     inner.status.frames.clear();
     inner.status.running = true;
     inner.status.phase = "Collecting RoboForex timeframes".into();
-    inner.status.error = None;
+    clear_transient(&mut inner);
+    if waiting {
+        inner.status.phase = "Waiting for fresh MT5 data; no new simulation entries".into();
+        set_issue(
+            &mut inner,
+            ISSUE_MARKET,
+            Some(
+                "Market closed or paused: no new XAUUSD ticks. Trading resumes automatically when quotes return."
+                    .into(),
+            ),
+        );
+    }
     state.epoch.fetch_add(1, Ordering::SeqCst);
     state.running.store(true, Ordering::SeqCst);
     Ok(inner.status.clone())
@@ -415,6 +499,7 @@ pub async fn observer_stop(state: State<'_, ObserverState>) -> Result<ObserverSt
     inner.status.running = false;
     inner.status.money_armed = false;
     inner.status.phase = "Stopped; pending inference cancelled, existing simulation remains protected".into();
+    clear_transient(&mut inner);
     let sim = inner.sim.clone();
     journal(
         &mut inner,
@@ -474,19 +559,21 @@ pub async fn observer_provider_save(
     key: String,
     model: String,
 ) -> Result<Info, String> {
-    if model != "anthropic/claude-fable-5" {
-        return Err("This mode uses anthropic/claude-fable-5".into());
-    }
+    let model = model.trim().to_string();
+    aegis_core::ai_provider::validate_model(&model)?;
     if state.running() {
-        return Err("Stop AI before changing provider credentials".into());
+        return Err("Stop AI before changing provider credentials or model".into());
     }
-    if !key.trim().is_empty() {
-        if key.len() > 512 || key.chars().any(char::is_control) {
-            return Err("Invalid provider key".into());
-        }
+    if !key.trim().is_empty() && (key.len() > 512 || key.chars().any(char::is_control)) {
+        return Err("Invalid provider key".into());
+    }
+    {
         let appstate = app.state::<AppState>();
         let mut store = appstate.settings.lock().await;
-        store.set_ai_key(key.trim());
+        if !key.trim().is_empty() {
+            store.set_ai_key(key.trim());
+        }
+        store.set_ai_model(Some(model));
         store.save().map_err(|e| e.to_string())?;
     }
     observer_info(app, state).await
@@ -508,8 +595,10 @@ pub async fn observer_provider_test(app: AppHandle, state: State<'_, ObserverSta
             .await
             .ai_key()
             .ok_or("Save an OpenRouter key first")?;
-        let answer = aegis_core::ai_provider::consult(
+        let model = selected_model(&app).await;
+        let answer = aegis_core::ai_provider::consult_model(
             &key,
+            &model,
             "Return {\"ready\":true}",
             "Connectivity test. Reply with JSON only.",
             25,
@@ -523,7 +612,7 @@ pub async fn observer_provider_test(app: AppHandle, state: State<'_, ObserverSta
             name: "OpenRouter / Anthropic".into(),
             ok: true,
             latency_ms: answer.latency_ms,
-            detail: "Actual provider response; billable API call".into(),
+            detail: format!("{} answered; billable API call", answer.model),
         })
     }
     .await;
@@ -595,6 +684,20 @@ pub async fn observer_check_cycle(app: AppHandle, state: State<'_, ObserverState
     }
     state.inner.lock().await.status.diagnostics = checks.clone();
     Ok(checks)
+}
+
+/// Repair: forget transient issues. Each loop re-reports a problem that still exists.
+pub(crate) async fn clear_issues(state: &ObserverState) {
+    let mut inner = state.inner.lock().await;
+    clear_transient(&mut inner);
+    set_issue(&mut inner, ISSUE_ACCOUNT, None);
+    set_issue(&mut inner, ISSUE_EVENTS, None);
+}
+
+/// Snapshot used by the full check.
+pub(crate) async fn health_snapshot(state: &ObserverState) -> (ObserverConfig, ObserverStatus, Option<String>) {
+    let inner = state.inner.lock().await;
+    (inner.config.clone(), inner.status.clone(), inner.recovery_error.clone())
 }
 
 async fn stop_entries(state: &ObserverState) {
@@ -732,7 +835,10 @@ async fn account_loop(app: AppHandle) {
         let conn = match connector(&appstate).await {
             Ok(conn) => conn,
             Err(_) => {
-                state.inner.lock().await.status.account = None;
+                // No RoboForex session: nothing to report until the user connects it.
+                let mut inner = state.inner.lock().await;
+                inner.status.account = None;
+                set_issue(&mut inner, ISSUE_ACCOUNT, None);
                 continue;
             }
         };
@@ -746,14 +852,21 @@ async fn account_loop(app: AppHandle) {
                     state.changed.send_replace(state.epoch.load(Ordering::SeqCst));
                     inner.status.running = false;
                     inner.status.money_armed = false;
-                    inner.status.error = Some("MT5 account changed; new entries stopped".into());
+                    set_issue(
+                        &mut inner,
+                        ISSUE_ACCOUNT,
+                        Some("MT5 account changed; new entries stopped".into()),
+                    );
+                } else {
+                    // The account answers again: the previous MT5 error is resolved.
+                    set_issue(&mut inner, ISSUE_ACCOUNT, None);
                 }
                 inner.status.account = Some(account);
             }
             Err(error) => {
                 let mut inner = state.inner.lock().await;
                 inner.status.account = None;
-                inner.status.error = Some(error.to_string());
+                set_issue(&mut inner, ISSUE_ACCOUNT, Some(error.to_string()));
             }
         }
     }
@@ -841,7 +954,7 @@ fn journal(inner: &mut Inner, value: Value) -> Result<(), String> {
             let message =
                 format!("Paper event archive unavailable; new entries blocked, closure remains available: {error}");
             inner.recovery_error = Some(message.clone());
-            inner.status.error = Some(message);
+            set_issue(inner, ISSUE_RECOVERY, Some(message));
         }
     }
     Ok(())
@@ -901,7 +1014,8 @@ async fn sample_loop(app: AppHandle) {
             }
                 Ok(())
             })();
-            if let Err(error)=event_result { inner.status.error=Some(error); }
+            set_issue(&mut inner, ISSUE_EVENTS, event_result.err());
+            set_issue(&mut inner, ISSUE_MARKET, None);
             inner.status.sample = Some(sample);
             if state.running() && !inner.status.frames.is_empty() {
                 let sample = inner.status.sample.as_ref().expect("sample was assigned");
@@ -932,14 +1046,21 @@ async fn sample_loop(app: AppHandle) {
                 let mut inner = state.inner.lock().await;
                 inner.status.frames = frames;
                 if inner.status.frames.is_empty() { return Err(format!("No usable closed candles: {}", failures.join("; "))); }
-                inner.status.error = if failures.is_empty() { None } else { Some(format!("Unavailable frames: {}", failures.join("; "))) };
+                let frames_issue = if failures.is_empty() { None } else { Some(format!("Unavailable frames: {}", failures.join("; "))) };
+                set_issue(&mut inner, ISSUE_FRAMES, frames_issue);
                 state.changed.send_replace(state.sequence.fetch_add(1, Ordering::SeqCst));
             }
             Ok::<_, String>(())
         }.await;
         if let Err(error) = result {
             let mut inner = state.inner.lock().await;
-            inner.status.error = Some(error);
+            let closed = error.contains("stale");
+            let message = if closed {
+                format!("Market closed or paused: no new XAUUSD ticks. Trading resumes automatically when quotes return. {error}")
+            } else {
+                error
+            };
+            set_issue(&mut inner, ISSUE_MARKET, Some(message));
             inner.status.phase = "Waiting for fresh MT5 data; no new simulation entries".into();
             inner.status.sample = None;
             frames_at = 0;
@@ -1053,7 +1174,7 @@ async fn decision_loop(app: AppHandle) {
                 &mut inner,
                 json!({"schema_version":1,"kind":"snapshot","source":"RoboForex MT5 XAUUSD","snapshot":snapshot,"config":config,"model_id":version,"strategy_id":strategy.id}),
             ) {
-                inner.status.error = Some(error);
+                set_issue(&mut inner, ISSUE_JOURNAL, Some(error));
                 state.running.store(false, Ordering::SeqCst);
                 inner.status.running = false;
                 continue;
@@ -1190,6 +1311,7 @@ async fn decision_loop(app: AppHandle) {
                             } else {
                                 let event_review = event_gate.ok().flatten();
                                 let key = app.state::<AppState>().settings.lock().await.ai_key();
+                                let cloud_model = selected_model(&app).await;
                                 match key {
                                     Some(key) => {
                                         if !state.running() || epoch != state.epoch.load(Ordering::SeqCst) {
@@ -1207,7 +1329,7 @@ async fn decision_loop(app: AppHandle) {
                                         let cloud_payload = json!({"market":cloud_input,"local_proposal":local_decision,
                                     "instruction":"Independently check the SPA and supplied market. Return the same decision schema with the actual snapshot_id. Disagreement means wait."}).to_string();
                                         let cloud = tokio::select! {
-                                            value = aegis_core::ai_provider::consult(&key,&cloud_payload,&system,25) => value,
+                                            value = aegis_core::ai_provider::consult_model(&key,&cloud_model,&cloud_payload,&system,25) => value,
                                             _ = async {
                                                 loop {
                                                     if !state.running() || epoch!=state.epoch.load(Ordering::SeqCst) { break; }
@@ -1394,7 +1516,7 @@ async fn decision_loop(app: AppHandle) {
                 let sim = next_sim.clone();
                 let event = json!({"schema_version":1,"kind":"decision","at_ms":now_ms(),"snapshot_id":snapshot.id,"strategy_id":strategy.id,"decision":decision,"accepted":accepted,"reason":reason,"elapsed_ms":answer.elapsed_ms,"sim_state":sim,"paper_outcome":paper_outcome,"source":config.mode});
                 if let Err(error) = journal(&mut inner, event) {
-                    inner.status.error = Some(error);
+                    set_issue(&mut inner, ISSUE_JOURNAL, Some(error));
                     state.running.store(false, Ordering::SeqCst);
                     inner.status.running = false;
                 } else {
@@ -1416,7 +1538,7 @@ async fn decision_loop(app: AppHandle) {
                         "Decision rejected; observing"
                     }
                     .into();
-                    inner.status.error = None;
+                    set_issue(&mut inner, ISSUE_DECISION, None);
                     inner.status.position = inner.sim.position.clone();
                     inner.status.equity = inner.sim.equity;
                 }
@@ -1425,11 +1547,11 @@ async fn decision_loop(app: AppHandle) {
                 if let Some(events) = inner.events.as_mut() {
                     let _ = events.reject(&format!("{}:{}", strategy.id, snapshot.id), now_ms(), &error);
                 }
-                inner.status.error = Some(error.clone());
+                set_issue(&mut inner, ISSUE_DECISION, Some(error.clone()));
                 inner.status.phase = "Inference failed; no new simulation entry".into();
                 let event = json!({"schema_version":1,"kind":"inference_error","at_ms":now_ms(),"snapshot_id":snapshot.id,"strategy_id":strategy.id,"error":error});
                 if let Err(error) = journal(&mut inner, event) {
-                    inner.status.error = Some(error);
+                    set_issue(&mut inner, ISSUE_JOURNAL, Some(error));
                     state.running.store(false, Ordering::SeqCst);
                     inner.status.running = false;
                 }
@@ -1446,7 +1568,10 @@ mod tests {
         std::env::temp_dir().join(format!(
             "aegis-observer-state-{}-{}",
             std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ))
     }
 

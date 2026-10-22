@@ -41,6 +41,14 @@ TRADE_SYMBOL = "XAUUSD"
 # MT5 timestamps are UTC by default. Nonstandard broker clocks must be configured
 # independently: a cached tick cannot distinguish a timezone offset from quote age.
 MAX_CLOCK_OFFSET_S = 14 * 3600
+# Application clock correction measured against internet time (never inferred from ticks).
+MAX_CLOCK_CORRECTION_MS = 6 * 3600 * 1000
+
+# MetaTrader5 Python IPC failures: the link between this process and the terminal broke
+# (terminal restarted, closed, updated or the computer slept). The terminal keeps running,
+# so a fresh initialize() with the same login restores the link without user action.
+IPC_ERRORS = {-10001, -10002, -10003, -10004, -10005}
+RECOVERY_INTERVAL_S = 3.0
 
 
 class BridgeError(Exception):
@@ -55,6 +63,93 @@ class Bridge:
         self.offset_source = "UTC default"
         self._ledger_path = None
         self._account_identity = None
+        self.clock_correction_ms = 0
+        self._login = None
+        self._recovery = {"attempts": 0, "recovered": 0, "last_at_ms": 0, "last_error": "", "last_ok_at_ms": 0}
+        self._last_attempt = 0.0
+
+    def _now_ms(self):
+        """Unix milliseconds of the app clock (computer clock plus a measured correction)."""
+        return time.time_ns() // 1_000_000 + int(self.clock_correction_ms)
+
+    def _set_clock(self, raw):
+        if type(raw) is not int or abs(raw) > MAX_CLOCK_CORRECTION_MS:
+            raise BridgeError("clock_correction_ms must be an integer within six hours")
+        self.clock_correction_ms = raw
+
+    def set_clock(self, req):
+        self._set_clock(req.get("clock_correction_ms", 0))
+        return {"clock_correction_ms": self.clock_correction_ms}
+
+    def _initialize(self, mt5):
+        login = self._login
+        if login is None:
+            raise BridgeError("not connected")
+        path, kwargs = login
+        return mt5.initialize(path, **kwargs) if path else mt5.initialize(**kwargs)
+
+    @staticmethod
+    def _error(mt5):
+        try:
+            code, message = mt5.last_error()
+            return int(code), str(message)
+        except Exception:  # noqa: BLE001 - diagnostics only
+            return 0, "unknown"
+
+    def _recover(self, mt5, reason):
+        """Re-open the IPC link to the same terminal and account. Never switches accounts."""
+        now = time.monotonic()
+        if now - self._last_attempt < RECOVERY_INTERVAL_S:
+            raise BridgeError(f"MT5 link lost ({reason}); automatic reconnect is in progress")
+        self._last_attempt = now
+        self._recovery["attempts"] += 1
+        self._recovery["last_at_ms"] = self._now_ms()
+        previous_symbol, identity = self.symbol, self._account_identity
+        try:
+            mt5.shutdown()
+        except Exception:  # noqa: BLE001 - the link is already broken
+            pass
+        if not self._initialize(mt5):
+            code, message = self._error(mt5)
+            self._recovery["last_error"] = f"{reason}; reinitialize failed ({code}): {message}"
+            raise BridgeError(f"MT5 link lost ({reason}); reconnect failed ({code}): {message}. "
+                              "Check that the MetaTrader 5 terminal is running and logged in")
+        info = mt5.account_info()
+        current = (int(info.login), str(info.server)) if info else None
+        if identity is not None and current != identity:
+            mt5.shutdown()
+            self.symbol = None
+            self._recovery["last_error"] = "terminal is logged in to a different account"
+            raise BridgeError("MT5 terminal is logged in to a different account; reconnect in Brokers")
+        if previous_symbol and (mt5.symbol_info(previous_symbol) is None or not mt5.symbol_select(previous_symbol, True)):
+            self._recovery["last_error"] = f"{previous_symbol} is unavailable after reconnect"
+            raise BridgeError(f"MT5 reconnected but {previous_symbol} is unavailable")
+        self._recovery["recovered"] += 1
+        self._recovery["last_error"] = ""
+        # Only failed attempts are rate-limited: a later break is recovered immediately.
+        self._last_attempt = 0.0
+        self._recovery["last_ok_at_ms"] = self._now_ms()
+        print(f"mt5 bridge: link restored after {reason}", file=sys.stderr)
+
+    def _link(self, mt5):
+        """Terminal info with automatic recovery of a broken IPC link."""
+        terminal = mt5.terminal_info()
+        if terminal is not None:
+            return terminal
+        code, message = self._error(mt5)
+        self._recover(mt5, f"terminal_info unavailable ({code}): {message}")
+        terminal = mt5.terminal_info()
+        if terminal is None:
+            code, message = self._error(mt5)
+            raise BridgeError(f"MT5 terminal is unavailable ({code}): {message}")
+        return terminal
+
+    def _connected(self, mt5):
+        terminal = self._link(mt5)
+        if not terminal.connected:
+            raise BridgeError("MT5 terminal is disconnected from the RoboForex trade server "
+                              "(check the terminal's connection status and internet)")
+        return terminal
 
     def mt5(self):
         if self._mt5 is None:
@@ -88,9 +183,13 @@ class Bridge:
             "server": str(req["server"]),
             "timeout": 30000,
         }
+        if "clock_correction_ms" in req:
+            self._set_clock(req["clock_correction_ms"])
         path = req.get("terminal_path")
-        ok = mt5.initialize(path, **kwargs) if path else mt5.initialize(**kwargs)
+        self._login = (path, kwargs)
+        ok = self._initialize(mt5)
         if not ok:
+            self._login = None
             code, message = mt5.last_error()
             mt5.shutdown()
             raise BridgeError(f"MT5 login failed ({code}): {message}")
@@ -144,7 +243,7 @@ class Bridge:
         add("clock_formula", "Clock normalization", "ok",
             "Normalized UTC = raw timestamp - configured offset. No automatic timezone detection. Reconnect after changing the setting.")
         tick = mt5.symbol_info_tick(self.symbol)
-        now_ms = time.time_ns() // 1_000_000
+        now_ms = self._now_ms()
         raw_ms = (getattr(tick, "time_msc", 0) or int(getattr(tick, "time", 0)) * 1000) if tick else 0
         utc = lambda ms: datetime.fromtimestamp(ms / 1000, timezone.utc).isoformat(timespec="milliseconds")
         add("clock_raw", "Raw quote timestamp (UTC)", "ok" if raw_ms > 0 else "warn",
@@ -208,8 +307,15 @@ class Bridge:
         limit = max(1, min(int(req.get("limit", 500)), MAX_BARS))
         rates = mt5.copy_rates_from_pos(self.symbol, getattr(mt5, name), 0, limit)
         if rates is None:
-            code, message = mt5.last_error()
-            raise BridgeError(f"copy_rates_from_pos failed ({code}): {message}")
+            code, message = self._error(mt5)
+            if code in IPC_ERRORS:
+                # The terminal link broke (IPC send/receive failed): reconnect once and retry.
+                self._recover(mt5, f"copy_rates_from_pos failed ({code}): {message}")
+                rates = mt5.copy_rates_from_pos(self.symbol, getattr(mt5, name), 0, limit)
+                if rates is None:
+                    code, message = self._error(mt5)
+            if rates is None:
+                raise BridgeError(f"copy_rates_from_pos failed ({code}): {message}")
         # CFDs have no exchange volume; tick volume is the closest proxy.
         return [
             {
@@ -259,7 +365,7 @@ class Bridge:
                 raise BridgeError(f"MT5 market depth has no {'bid' if not bids else 'ask'} levels for {self.symbol}")
             return {
                 "symbol": self.symbol,
-                "timestamp": time.time_ns() // 1_000_000,
+                "timestamp": self._now_ms(),
                 "bids": bids,
                 "asks": asks,
             }
@@ -275,7 +381,7 @@ class Bridge:
         limit = req.get("max_ticks", 512)
         if any(isinstance(x, bool) or not isinstance(x, int) for x in (start, end, limit)):
             raise BridgeError("history bounds and max_ticks must be integers")
-        now_ms = time.time_ns() // 1_000_000
+        now_ms = self._now_ms()
         if start <= 0 or end <= start or end - start > 10 * 3600 * 1000 or end > now_ms + 2000:
             raise BridgeError("history slice requires positive UTC bounds, at most 10 hours, not future data")
         if not 1 <= limit <= 2000:
@@ -287,10 +393,8 @@ class Bridge:
             account = mt5.account_info()
             if account is None or self._account_identity is None or (int(account.login), str(account.server)) != self._account_identity:
                 raise BridgeError("MT5 account changed; reconnect before requesting history")
+        self._connected(mt5)
         verify_account()
-        terminal = mt5.terminal_info()
-        if terminal is None or not terminal.connected:
-            raise BridgeError("MT5 terminal is disconnected")
         copy_ticks = getattr(mt5, "copy_ticks_from", None)
         if copy_ticks is None:
             raise BridgeError("MT5 tick history API unavailable")
@@ -332,7 +436,7 @@ class Bridge:
             except (KeyError, TypeError, ValueError, OverflowError, AttributeError):
                 invalid += 1
         truncated = len(ticks) > limit or inspected > limit
-        result = {"symbol":self.symbol,"start_ms":start,"end_ms":end,"observed_at_ms":time.time_ns() // 1_000_000,
+        result = {"symbol":self.symbol,"start_ms":start,"end_ms":end,"observed_at_ms":self._now_ms(),
                   "ticks":ticks[:limit],"truncated":truncated,"complete_history":False,
                   "volume_kind":"mt5_ticks_not_exchange_tape",
                   "coverage_note":f"Bounded first ticks from requested UTC slice; full history not established; invalid_rows={invalid}; outside_rows={outside}"}
@@ -344,9 +448,7 @@ class Bridge:
         if not self.symbol:
             raise BridgeError("not connected")
         mt5 = self.mt5()
-        terminal = mt5.terminal_info()
-        if terminal is None or not terminal.connected:
-            raise BridgeError("MT5 terminal is disconnected")
+        self._connected(mt5)
 
         tick = mt5.symbol_info_tick(self.symbol)
         if tick is None:
@@ -423,7 +525,7 @@ class Bridge:
             book_note = str(exc)
         return {
             "symbol": self.symbol,
-            "observed_at_ms": time.time_ns() // 1_000_000,
+            "observed_at_ms": self._now_ms(),
             "quote": quote,
             "ticks": ticks,
             "book": book,
@@ -640,9 +742,17 @@ class Bridge:
         if not self.symbol:
             raise BridgeError("not connected")
         mt5 = self.mt5()
-        account, info, terminal = mt5.account_info(), mt5.symbol_info(self.symbol), mt5.terminal_info()
+        terminal = self._link(mt5)
+        account, info = mt5.account_info(), mt5.symbol_info(self.symbol)
         if account is None or info is None:
-            raise BridgeError("MT5 account or symbol information is unavailable")
+            code, message = self._error(mt5)
+            if code in IPC_ERRORS:
+                self._recover(mt5, f"account_info unavailable ({code}): {message}")
+                terminal = self._link(mt5)
+                account, info = mt5.account_info(), mt5.symbol_info(self.symbol)
+        if account is None or info is None:
+            code, message = self._error(mt5)
+            raise BridgeError(f"MT5 account or symbol information is unavailable ({code}): {message}")
         positions = []
         for pos in self._positions(mt5):
             positions.append({"ticket": int(pos.ticket), "symbol": str(pos.symbol),
@@ -659,16 +769,15 @@ class Bridge:
                             "trade_allowed": bool(terminal and terminal.connected and terminal.trade_allowed and
                                                    account.trade_allowed and account.trade_expert),
                             "demo": bool(account.trade_mode == mt5.ACCOUNT_TRADE_MODE_DEMO),
-                            "time_ms": time.time_ns() // 1_000_000},
+                            "time_ms": self._now_ms()},
                 "positions": positions, "contract_size": float(info.trade_contract_size),
                 "volume_min": float(info.volume_min), "volume_max": float(info.volume_max),
                 "volume_step": float(info.volume_step),
                 "hedging": margin_mode == mt5.ACCOUNT_MARGIN_MODE_RETAIL_HEDGING}
 
     def _trading_permission(self, mt5, require_usd=True, require_algo=True):
-        terminal, account = mt5.terminal_info(), mt5.account_info()
-        if terminal is None or not terminal.connected:
-            raise BridgeError("MT5 terminal is disconnected")
+        terminal = self._connected(mt5)
+        account = mt5.account_info()
         if account is None or not account.trade_allowed or not account.trade_expert:
             raise BridgeError("MT5 account trading is not allowed")
         if self._account_identity is None or (int(account.login), str(account.server)) != self._account_identity:
@@ -726,7 +835,7 @@ class Bridge:
                 contract_data[1] > contract_data[2] or contract_data[3] > contract_data[2]):
             raise BridgeError("XAUUSD contract or account risk data is invalid")
         stamp = getattr(tick, "time_msc", 0) or int(tick.time) * 1000
-        now_ms = time.time_ns() // 1_000_000
+        now_ms = self._now_ms()
         if stamp <= 0 or now_ms - stamp > 10_000 or stamp - now_ms > 2_000:
             raise BridgeError("XAUUSD quote is stale")
         bid, ask = float(tick.bid), float(tick.ask)
@@ -791,7 +900,7 @@ class Bridge:
         def send(mark_dispatched):
             fresh = mt5.symbol_info_tick(self.symbol)
             fresh_time = getattr(fresh, "time_msc", 0) or int(fresh.time) * 1000 if fresh else 0
-            if fresh is None or time.time_ns() // 1_000_000 - fresh_time > 10_000:
+            if fresh is None or self._now_ms() - fresh_time > 10_000:
                 return self._trade_result(request_id, "rejected", -1, "quote became stale before order check")
             price = float(fresh.ask if side == "BUY" else fresh.bid)
             if (not math.isfinite(float(fresh.bid)) or not math.isfinite(float(fresh.ask)) or
@@ -811,7 +920,7 @@ class Bridge:
             account_now = self._trading_permission(mt5)
             final_tick = mt5.symbol_info_tick(self.symbol)
             final_time = getattr(final_tick, "time_msc", 0) or int(final_tick.time) * 1000 if final_tick else 0
-            if final_tick is None or time.time_ns() // 1_000_000 - final_time > 10_000:
+            if final_tick is None or self._now_ms() - final_time > 10_000:
                 return self._trade_result(request_id, "rejected", -1, "quote became stale after order check")
             final_bid, final_ask = float(final_tick.bid), float(final_tick.ask)
             if (not math.isfinite(final_bid) or not math.isfinite(final_ask) or final_bid <= 0 or
@@ -851,7 +960,7 @@ class Bridge:
                                           getattr(final_check, "comment", "MT5 final order_check failed"))
             last_tick = mt5.symbol_info_tick(self.symbol)
             last_time = getattr(last_tick, "time_msc", 0) or int(last_tick.time) * 1000 if last_tick else 0
-            if (last_tick is None or time.time_ns() // 1_000_000 - last_time > 10_000 or
+            if (last_tick is None or self._now_ms() - last_time > 10_000 or
                     abs(float(last_tick.bid) - final_bid) > float(info.point) or
                     abs(float(last_tick.ask) - final_ask) > float(info.point)):
                 return self._trade_result(request_id, "rejected", -1, "quote moved during final broker check")
@@ -911,7 +1020,7 @@ class Bridge:
             raise BridgeError("position is absent or not owned by AEGIS for exact XAUUSD")
         tick = mt5.symbol_info_tick(self.symbol)
         stamp = getattr(tick, "time_msc", 0) or int(tick.time) * 1000 if tick else 0
-        if tick is None or time.time_ns() // 1_000_000 - stamp > 10_000:
+        if tick is None or self._now_ms() - stamp > 10_000:
             raise BridgeError("XAUUSD quote is stale or unavailable")
         side = mt5.ORDER_TYPE_SELL if pos.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY
         price = float(tick.bid if side == mt5.ORDER_TYPE_SELL else tick.ask)
@@ -926,7 +1035,7 @@ class Bridge:
                 return self._trade_result(str(ticket), "rejected", -1, "position volume changed before close")
             fresh_tick = mt5.symbol_info_tick(self.symbol)
             fresh_stamp = getattr(fresh_tick, "time_msc", 0) or int(fresh_tick.time) * 1000 if fresh_tick else 0
-            if fresh_tick is None or time.time_ns() // 1_000_000 - fresh_stamp > 10_000:
+            if fresh_tick is None or self._now_ms() - fresh_stamp > 10_000:
                 return self._trade_result(str(ticket), "rejected", -1, "XAUUSD quote became stale before close")
             fresh_price = float(fresh_tick.bid if side == mt5.ORDER_TYPE_SELL else fresh_tick.ask)
             order = {"action": mt5.TRADE_ACTION_DEAL, "position": ticket, "symbol": self.symbol,
@@ -1008,7 +1117,7 @@ class Bridge:
             raise BridgeError("reduction amount is below broker minimum volume")
         tick = mt5.symbol_info_tick(self.symbol)
         stamp = getattr(tick, "time_msc", 0) or int(tick.time) * 1000 if tick else 0
-        if tick is None or time.time_ns() // 1_000_000 - stamp > 10_000:
+        if tick is None or self._now_ms() - stamp > 10_000:
             raise BridgeError("XAUUSD quote is stale")
         side = mt5.ORDER_TYPE_SELL if pos.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY
         price = float(tick.bid if side == mt5.ORDER_TYPE_SELL else tick.ask)
@@ -1022,7 +1131,7 @@ class Bridge:
                 return self._trade_result(str(ticket), "rejected", -1, "position volume changed before reduce")
             fresh = mt5.symbol_info_tick(self.symbol)
             fresh_stamp = getattr(fresh, "time_msc", 0) or int(fresh.time) * 1000 if fresh else 0
-            if fresh is None or time.time_ns() // 1_000_000 - fresh_stamp > 10_000:
+            if fresh is None or self._now_ms() - fresh_stamp > 10_000:
                 return self._trade_result(str(ticket), "rejected", -1, "XAUUSD quote became stale before reduce")
             order = {"action": mt5.TRADE_ACTION_DEAL, "position": ticket, "symbol": self.symbol,
                      "volume": float(amount), "type": side, "price": price, "deviation": 20,
@@ -1037,7 +1146,7 @@ class Bridge:
             self._trading_permission(mt5, require_usd=False, require_algo=False)
             after_check = mt5.symbol_info_tick(self.symbol)
             after_stamp = getattr(after_check, "time_msc", 0) or int(after_check.time) * 1000 if after_check else 0
-            if after_check is None or time.time_ns() // 1_000_000 - after_stamp > 10_000:
+            if after_check is None or self._now_ms() - after_stamp > 10_000:
                 return self._trade_result(str(ticket), "rejected", -1, "XAUUSD quote became stale after reduce check")
             verified = next((p for p in self._positions(mt5) if int(p.ticket) == ticket), None)
             if (verified is None or int(verified.magic) != MAGIC or verified.symbol != TRADE_SYMBOL or
@@ -1078,7 +1187,7 @@ class Bridge:
             return cached
         info, tick = mt5.symbol_info(self.symbol), mt5.symbol_info_tick(self.symbol)
         stamp = getattr(tick, "time_msc", 0) or int(tick.time) * 1000 if tick else 0
-        if tick is None or time.time_ns() // 1_000_000 - stamp > 10_000:
+        if tick is None or self._now_ms() - stamp > 10_000:
             raise BridgeError("XAUUSD quote is stale")
         bid, ask = float(tick.bid), float(tick.ask)
         distance = max(float(info.trade_stops_level) * float(info.point), float(info.point))
@@ -1109,7 +1218,7 @@ class Bridge:
                 return self._trade_result(str(ticket), "rejected", -1, "stop may not be widened")
             fresh = mt5.symbol_info_tick(self.symbol)
             fresh_stamp = getattr(fresh, "time_msc", 0) or int(fresh.time) * 1000 if fresh else 0
-            if fresh is None or time.time_ns() // 1_000_000 - fresh_stamp > 10_000:
+            if fresh is None or self._now_ms() - fresh_stamp > 10_000:
                 return self._trade_result(str(ticket), "rejected", -1, "XAUUSD quote became stale before stop update")
             order = {"action": mt5.TRADE_ACTION_SLTP, "position": ticket, "symbol": self.symbol,
                      "sl": stop, "tp": target}
@@ -1129,11 +1238,62 @@ class Bridge:
 
         return self._run_once(key, payload, send)
 
+    def health(self, _req=None):
+        """Read-only link, terminal, account and quote diagnostics for the full check.
+
+        Never raises for a broken terminal: every problem is reported as data so the app can
+        explain the cause. A broken IPC link is recovered first, like any other request.
+        """
+        if not self.symbol:
+            raise BridgeError("not connected")
+        mt5 = self.mt5()
+        report = {"symbol": self.symbol, "offset_seconds": self.offset, "offset_source": self.offset_source,
+                  "clock_correction_ms": self.clock_correction_ms, "now_ms": self._now_ms(),
+                  "recovery": dict(self._recovery), "ipc": True, "ipc_error": "",
+                  "terminal": None, "account": None, "quote": None, "rates_ok": None, "rates_error": ""}
+        try:
+            terminal = self._link(mt5)
+        except BridgeError as exc:
+            report["ipc"] = False
+            report["ipc_error"] = str(exc)
+            report["recovery"] = dict(self._recovery)
+            return report
+        report["recovery"] = dict(self._recovery)
+        report["terminal"] = {"connected": bool(terminal.connected), "trade_allowed": bool(terminal.trade_allowed),
+                              "company": str(getattr(terminal, "company", "")), "build": int(getattr(terminal, "build", 0) or 0)}
+        info = mt5.account_info()
+        if info is not None:
+            report["account"] = {"login": int(info.login), "server": str(info.server), "currency": str(info.currency),
+                                 "balance": float(info.balance), "trade_allowed": bool(info.trade_allowed),
+                                 "trade_expert": bool(info.trade_expert),
+                                 "same_identity": self._account_identity in (None, (int(info.login), str(info.server)))}
+        tick = mt5.symbol_info_tick(self.symbol)
+        if tick is not None:
+            raw_ms = int(getattr(tick, "time_msc", 0) or int(getattr(tick, "time", 0)) * 1000)
+            normalized = raw_ms - self.offset * 1000
+            report["quote"] = {"raw_ms": raw_ms, "time_ms": normalized, "age_ms": report["now_ms"] - normalized,
+                               "bid": float(tick.bid), "ask": float(tick.ask)}
+        rates = mt5.copy_rates_from_pos(self.symbol, mt5.TIMEFRAME_M1, 0, 2)
+        report["rates_ok"] = rates is not None and len(rates) > 0
+        if not report["rates_ok"]:
+            code, message = self._error(mt5)
+            report["rates_error"] = f"({code}): {message}"
+        return report
+
+    def reinit(self, _req=None):
+        """Explicit repair: re-open the terminal link with the stored login."""
+        if self._login is None:
+            raise BridgeError("not connected")
+        self._last_attempt = 0.0
+        self._recover(self.mt5(), "manual repair")
+        return self.health()
+
     def shutdown(self, _req=None):
         if self._mt5 is not None:
             self._mt5.shutdown()
         self.symbol = None
         self._account_identity = None
+        self._login = None
         return {}
 
 
@@ -1151,6 +1311,9 @@ def serve(bridge, stdin, stdout):
         "close_all": bridge.close_all,
         "reduce_position": bridge.reduce_position,
         "modify_stop": bridge.modify_stop,
+        "health": bridge.health,
+        "reinit": bridge.reinit,
+        "set_clock": bridge.set_clock,
         "shutdown": bridge.shutdown,
     }
     try:
