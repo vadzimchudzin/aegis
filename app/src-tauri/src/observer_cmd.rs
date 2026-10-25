@@ -240,6 +240,11 @@ impl ObserverState {
                                     daily_equity = equity;
                                 }
                             }
+                            if record["kind"] == observer::JOURNAL_CHECKPOINT_KIND {
+                                // totals of the records moved to the archive by a journal rotation
+                                decisions += record["decisions_before"].as_u64().unwrap_or(0);
+                                outcomes += record["outcomes_before"].as_u64().unwrap_or(0);
+                            }
                             if record["kind"] == "decision" {
                                 decisions += 1;
                             }

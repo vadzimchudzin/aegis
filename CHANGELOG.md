@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.0-beta.11 — Journal rotation
+
+- Fix `journal append would exceed the 32 MiB limit`: the observer journal rotates at 24 MiB into a verified zstd archive instead of refusing records.
+- The new journal keeps a checkpoint (simulator state, daily baseline, totals), every unresolved broker intent and the newest records; replay recovers the same state.
+- A corrupt journal is never rotated or touched. See `docs/release-beta11.md`.
+
 ## 0.7.0-beta.10 — Full check, Repair, AI repair, Anthropic model choice
 
 - Observer issues are tracked per source and clear themselves after recovery (no permanent MT5 errors).
