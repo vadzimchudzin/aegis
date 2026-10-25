@@ -22,6 +22,13 @@ const MAX_PROMPT_CHARS: usize = 512;
 const MAX_PROMPT_BYTES: usize = 6_000;
 const MAX_PROMPTS_TOTAL_BYTES: usize = 30_000;
 const MAX_JOURNAL_BYTES: u64 = 32 * 1024 * 1024;
+/// When an append would push the journal past this size, the journal is rotated first: the full file goes to a
+/// compressed, hash-verified archive and a new journal starts with a checkpoint (see `Journal::rotate`).
+const ROTATE_JOURNAL_BYTES: u64 = 24 * 1024 * 1024;
+/// The newest records (and every unresolved broker intent) are carried over verbatim into the new journal so replay
+/// keeps recent context: event reconciliation, the latest simulator state, pending money.
+const CARRY_JOURNAL_BYTES: u64 = 4 * 1024 * 1024;
+pub const JOURNAL_CHECKPOINT_KIND: &str = "journal_checkpoint";
 const MAX_SAMPLE_AGE_MS: u64 = 30_000;
 const REQUIRED_STRATEGIES: [&str; 5] = ["density_bounce", "structural", "breakout", "liquidity_sweep", "data"];
 
@@ -1301,6 +1308,16 @@ impl SimState {
 
 pub struct Journal {
     path: PathBuf,
+    rotate_at: u64,
+    carry_max: u64,
+}
+
+/// What a rotation did; the archive is a complete zstd copy of the previous journal.
+#[derive(Clone, Debug, PartialEq)]
+pub struct JournalRotation {
+    pub archive: PathBuf,
+    pub archived_records: usize,
+    pub carried_records: usize,
 }
 
 impl Journal {
@@ -1321,7 +1338,173 @@ impl Journal {
         if file.metadata().map_err(|e| format!("stat journal: {e}"))?.len() > MAX_JOURNAL_BYTES {
             return Err("journal exceeds the 32 MiB limit".into());
         }
-        Ok(Self { path })
+        Ok(Self {
+            path,
+            rotate_at: ROTATE_JOURNAL_BYTES,
+            carry_max: CARRY_JOURNAL_BYTES,
+        })
+    }
+
+    /// Smaller limits for tests; production uses `new`.
+    #[doc(hidden)]
+    pub fn with_limits(path: impl AsRef<Path>, rotate_at: u64, carry_max: u64) -> Result<Self, String> {
+        let mut journal = Self::new(path)?;
+        journal.rotate_at = rotate_at.min(MAX_JOURNAL_BYTES);
+        journal.carry_max = carry_max.min(rotate_at / 2);
+        Ok(journal)
+    }
+
+    pub fn archive_dir(&self) -> PathBuf {
+        self.path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default()
+            .join("journal-archive")
+    }
+
+    /// Move the full journal into a compressed, verified archive and start a new journal with a checkpoint record
+    /// followed by the carried records. Replaying the new journal gives the same simulator state, daily baseline,
+    /// unresolved broker intents and decision/outcome totals as replaying the old one.
+    pub fn rotate(&mut self) -> Result<JournalRotation, String> {
+        let raw = fs::read(&self.path).map_err(|e| format!("read journal for rotation: {e}"))?;
+        let text = std::str::from_utf8(&raw).map_err(|e| format!("journal is not UTF-8: {e}"))?;
+        let lines: Vec<&str> = text.lines().collect();
+        let mut values = Vec::with_capacity(lines.len());
+        for (index, line) in lines.iter().enumerate() {
+            let value: Value = serde_json::from_str(line)
+                .map_err(|e| format!("invalid journal JSON at line {} (rotation refused): {e}", index + 1))?;
+            values.push(value);
+        }
+        // unresolved broker intents must stay visible to replay, wherever they are in the file
+        let mut pending: Vec<usize> = Vec::new();
+        for (index, value) in values.iter().enumerate() {
+            if value["kind"] == "broker_intent" && value["request_id"].is_string() {
+                pending.push(index);
+            }
+            if value["kind"] == "broker_result" && value["result"]["status"] != "unknown" {
+                if let Some(id) = value["request_id"].as_str() {
+                    pending.retain(|&i| values[i]["request_id"].as_str() != Some(id));
+                }
+            }
+        }
+        // the newest records up to carry_max bytes are carried over verbatim
+        let mut cut = lines.len();
+        let mut carried_bytes = 0u64;
+        while cut > 0 {
+            let next = lines[cut - 1].len() as u64 + 1;
+            if carried_bytes + next > self.carry_max {
+                break;
+            }
+            carried_bytes += next;
+            cut -= 1;
+        }
+        let mut decisions_before = 0u64;
+        let mut outcomes_before = 0u64;
+        let mut sim_state = Value::Null;
+        let mut daily: Option<(Value, Value)> = None;
+        for value in &values[..cut] {
+            if value["kind"] == JOURNAL_CHECKPOINT_KIND {
+                decisions_before += value["decisions_before"].as_u64().unwrap_or(0);
+                outcomes_before += value["outcomes_before"].as_u64().unwrap_or(0);
+            }
+            if value["kind"] == "decision" {
+                decisions_before += 1;
+            }
+            if value["kind"] == "outcome" || value.get("paper_outcome").is_some_and(|v| !v.is_null()) {
+                outcomes_before += 1;
+            }
+            if let Some(state) = value.get("sim_state") {
+                if !state.is_null() {
+                    sim_state = state.clone();
+                }
+            }
+            if value["daily_day"].is_u64() && value["daily_equity"].as_f64().is_some_and(|e| e.is_finite() && e > 0.0) {
+                daily = Some((value["daily_day"].clone(), value["daily_equity"].clone()));
+            }
+        }
+        // 1. archive the complete old journal and prove it reads back byte for byte
+        let digest = hex::encode(Sha256::digest(&raw));
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let dir = self.archive_dir();
+        fs::create_dir_all(&dir).map_err(|e| format!("create journal archive directory: {e}"))?;
+        let stem = self.path.file_stem().and_then(|s| s.to_str()).unwrap_or("journal");
+        let mut archive = dir.join(format!("{stem}-{now}.jsonl.zst"));
+        let mut n = 1;
+        while archive.exists() {
+            archive = dir.join(format!("{stem}-{now}-{n}.jsonl.zst"));
+            n += 1;
+        }
+        let packed = zstd::encode_all(&raw[..], 9).map_err(|e| format!("compress journal archive: {e}"))?;
+        {
+            let mut file = File::create(&archive).map_err(|e| format!("create journal archive: {e}"))?;
+            set_private_permissions(&file)?;
+            file.write_all(&packed)
+                .and_then(|()| file.sync_all())
+                .map_err(|e| format!("write journal archive: {e}"))?;
+        }
+        let check = fs::read(&archive)
+            .map_err(|e| format!("read journal archive back: {e}"))
+            .and_then(|bytes| zstd::decode_all(&bytes[..]).map_err(|e| format!("decompress journal archive: {e}")))?;
+        if hex::encode(Sha256::digest(&check)) != digest {
+            let _ = fs::remove_file(&archive);
+            return Err("journal archive verification failed; the journal was left unchanged".into());
+        }
+        // 2. the new journal: checkpoint, unresolved intents from the archived part, then the carried tail
+        let mut checkpoint = json!({
+            "schema_version": 1, "kind": JOURNAL_CHECKPOINT_KIND, "at_ms": now,
+            "archive": archive.file_name().and_then(|s| s.to_str()).unwrap_or_default(),
+            "archive_sha256": digest, "archived_records": cut,
+            "decisions_before": decisions_before, "outcomes_before": outcomes_before,
+        });
+        if !sim_state.is_null() {
+            checkpoint["sim_state"] = sim_state;
+        }
+        if let Some((day, equity)) = daily {
+            checkpoint["daily_day"] = day;
+            checkpoint["daily_equity"] = equity;
+        }
+        let mut fresh = serde_json::to_vec(&checkpoint).map_err(|e| format!("serialize checkpoint: {e}"))?;
+        fresh.push(b'\n');
+        let mut carried_records = 0;
+        for &index in pending.iter().filter(|&&i| i < cut) {
+            fresh.extend_from_slice(lines[index].as_bytes());
+            fresh.push(b'\n');
+            carried_records += 1;
+        }
+        for line in &lines[cut..] {
+            fresh.extend_from_slice(line.as_bytes());
+            fresh.push(b'\n');
+            carried_records += 1;
+        }
+        let temp = self.path.with_extension("jsonl.rotating");
+        {
+            let mut file = File::create(&temp).map_err(|e| format!("create rotated journal: {e}"))?;
+            set_private_permissions(&file)?;
+            file.write_all(&fresh)
+                .and_then(|()| file.sync_all())
+                .map_err(|e| format!("write rotated journal: {e}"))?;
+        }
+        fs::rename(&temp, &self.path).map_err(|e| {
+            let _ = fs::remove_file(&temp);
+            format!(
+                "replace journal after archiving (old journal kept, archive at {}): {e}",
+                archive.display()
+            )
+        })?;
+        log::info!(
+            "journal rotated: {} records archived to {}, {} carried",
+            cut,
+            archive.display(),
+            carried_records
+        );
+        Ok(JournalRotation {
+            archive,
+            archived_records: cut,
+            carried_records,
+        })
     }
 
     pub fn append(&mut self, value: &Value) -> Result<(), String> {
@@ -1334,7 +1517,17 @@ impl Journal {
             .open(&self.path)
             .map_err(|e| format!("open journal for append: {e}"))?;
         set_private_permissions(&file)?;
-        let size = file.metadata().map_err(|e| format!("stat journal: {e}"))?.len();
+        let mut size = file.metadata().map_err(|e| format!("stat journal: {e}"))?.len();
+        if size.saturating_add(line.len() as u64) > self.rotate_at {
+            drop(file);
+            self.rotate()?;
+            file = OpenOptions::new()
+                .append(true)
+                .read(true)
+                .open(&self.path)
+                .map_err(|e| format!("open journal after rotation: {e}"))?;
+            size = file.metadata().map_err(|e| format!("stat journal: {e}"))?.len();
+        }
         if size.saturating_add(line.len() as u64) > MAX_JOURNAL_BYTES {
             return Err("journal append would exceed the 32 MiB limit".into());
         }
@@ -2059,6 +2252,166 @@ pub(crate) mod tests {
         assert_eq!(journal.replay().unwrap().len(), 2);
         assert_eq!(journal.export().unwrap().lines().count(), 2);
         drop(journal);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    fn rotation_dir(tag: &str) -> PathBuf {
+        let directory = std::env::temp_dir().join(format!("aegis-rotation-{}-{tag}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        directory
+    }
+
+    /// What the desktop app recovers from a journal (same rules as observer_cmd::ObserverState::new).
+    fn recovered(records: &[Value]) -> (u64, u64, Value, Option<u64>, Vec<String>) {
+        let (mut decisions, mut outcomes, mut sim, mut day) = (0, 0, Value::Null, None);
+        let mut pending: Vec<String> = Vec::new();
+        for r in records {
+            if r["kind"] == JOURNAL_CHECKPOINT_KIND {
+                decisions += r["decisions_before"].as_u64().unwrap();
+                outcomes += r["outcomes_before"].as_u64().unwrap();
+            }
+            if r["kind"] == "decision" {
+                decisions += 1;
+            }
+            if r["kind"] == "outcome" {
+                outcomes += 1;
+            }
+            if r.get("sim_state").is_some() {
+                sim = r["sim_state"].clone();
+            }
+            if let Some(d) = r["daily_day"].as_u64() {
+                day = Some(d);
+            }
+            if r["kind"] == "broker_intent" {
+                pending.push(r["request_id"].as_str().unwrap().to_owned());
+            }
+            if r["kind"] == "broker_result" && r["result"]["status"] != "unknown" {
+                pending.retain(|id| Some(id.as_str()) != r["request_id"].as_str());
+            }
+        }
+        (decisions, outcomes, sim, day, pending)
+    }
+
+    fn filler(i: u64) -> Value {
+        json!({"schema_version":1,"kind":"snapshot","snapshot":{"id":i,"pad":"x".repeat(400)}})
+    }
+
+    #[test]
+    fn full_journal_rotates_into_a_verified_archive_instead_of_failing() {
+        let directory = rotation_dir("full");
+        let path = directory.join("decisions.jsonl");
+        let mut journal = Journal::with_limits(&path, 64 * 1024, 8 * 1024).unwrap();
+        let mut all = Vec::new();
+        let push = |journal: &mut Journal, all: &mut Vec<Value>, value: Value| {
+            journal.append(&value).unwrap();
+            all.push(value);
+        };
+        push(
+            &mut journal,
+            &mut all,
+            json!({"kind":"broker_intent","request_id":"open-1","source":"money"}),
+        );
+        push(
+            &mut journal,
+            &mut all,
+            json!({"kind":"broker_intent","request_id":"done-1","source":"money"}),
+        );
+        push(
+            &mut journal,
+            &mut all,
+            json!({"kind":"broker_result","request_id":"done-1","result":{"status":"filled"}}),
+        );
+        push(
+            &mut journal,
+            &mut all,
+            json!({"kind":"daily_baseline","daily_day":20_386,"daily_equity":10_000,"sim_state":{"equity":10_000.0}}),
+        );
+        for i in 0..400u64 {
+            if i % 10 == 0 {
+                push(
+                    &mut journal,
+                    &mut all,
+                    json!({"kind":"decision","snapshot_id":i,"source":"paper"}),
+                );
+            }
+            if i % 25 == 0 {
+                push(
+                    &mut journal,
+                    &mut all,
+                    json!({"kind":"outcome","sim_state":{"equity":10_000.0 + i as f64}}),
+                );
+            }
+            push(&mut journal, &mut all, filler(i));
+        }
+        let size = fs::metadata(&path).unwrap().len();
+        assert!(size <= 64 * 1024, "journal stays under the rotation size: {size}");
+        let archives: Vec<_> = fs::read_dir(journal.archive_dir())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert!(!archives.is_empty(), "the full journal went to the archive");
+        let current = journal.replay().unwrap();
+        assert_eq!(current[0]["kind"], JOURNAL_CHECKPOINT_KIND);
+        // the new journal recovers exactly what the whole history would
+        assert_eq!(recovered(&current), recovered(&all));
+        assert_eq!(
+            recovered(&current).4,
+            vec!["open-1".to_string()],
+            "unresolved money intent is never lost"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn archives_decompress_to_the_exact_old_journal() {
+        let directory = rotation_dir("exact");
+        let path = directory.join("decisions.jsonl");
+        let mut journal = Journal::with_limits(&path, 32 * 1024, 4 * 1024).unwrap();
+        for i in 0..40 {
+            journal.append(&filler(i)).unwrap();
+        }
+        let before = fs::read(&path).unwrap();
+        let checkpoint_digest = hex::encode(Sha256::digest(&before));
+        let rotation = journal.rotate().unwrap();
+        let restored = zstd::decode_all(&fs::read(&rotation.archive).unwrap()[..]).unwrap();
+        assert_eq!(restored, before);
+        let current = journal.replay().unwrap();
+        assert_eq!(current[0]["archive_sha256"], checkpoint_digest);
+        assert_eq!(rotation.archived_records + rotation.carried_records, 40);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn repeated_rotations_keep_the_totals() {
+        let directory = rotation_dir("repeat");
+        let path = directory.join("decisions.jsonl");
+        let mut journal = Journal::with_limits(&path, 24 * 1024, 4 * 1024).unwrap();
+        for i in 0..300u64 {
+            journal
+                .append(&json!({"kind":"decision","snapshot_id":i,"pad":"y".repeat(300)}))
+                .unwrap();
+        }
+        assert!(fs::read_dir(journal.archive_dir()).unwrap().count() >= 3);
+        assert_eq!(recovered(&journal.replay().unwrap()).0, 300);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn corrupt_journal_is_not_rotated_or_touched() {
+        let directory = rotation_dir("corrupt");
+        let path = directory.join("decisions.jsonl");
+        let mut journal = Journal::with_limits(&path, 16 * 1024, 2 * 1024).unwrap();
+        journal.append(&filler(1)).unwrap();
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"{broken\n")
+            .unwrap();
+        let before = fs::read(&path).unwrap();
+        let error = journal.rotate().unwrap_err();
+        assert!(error.contains("rotation refused"), "{error}");
+        assert_eq!(fs::read(&path).unwrap(), before);
         fs::remove_dir_all(directory).unwrap();
     }
 
