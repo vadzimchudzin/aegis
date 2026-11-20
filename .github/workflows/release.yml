@@ -3,7 +3,7 @@ name: release
 "on":
   push:
     branches:
-      - release/0.7.0-beta.11
+      - "release/**"
     tags:
       - "v*"
   workflow_dispatch:
@@ -12,7 +12,7 @@ name: release
 # Isolate by tested commit so a stalled obsolete verification cannot block the current one.
 # Preflight and final publication still bind the immutable tag to the tested SHA.
 concurrency:
-  group: release-${{ github.ref == 'refs/heads/release/0.7.0-beta.11' && 'v0.7.0-beta.11' || github.ref_name }}-${{ github.sha }}
+  group: release-${{ github.ref_name }}-${{ github.sha }}
   cancel-in-progress: true
 
 jobs:
@@ -22,14 +22,15 @@ jobs:
       contents: write
       actions: write
     steps:
-      - name: Cancel older attempts for this beta branch
-        if: github.ref == 'refs/heads/release/0.7.0-beta.11'
+      - name: Cancel older attempts for this release branch
+        if: startsWith(github.ref, 'refs/heads/release/')
         uses: actions/github-script@v7
         with:
           script: |
             const { owner, repo } = context.repo;
+            const branch = context.ref.replace('refs/heads/', '');
             const { data: current } = await github.rest.actions.getWorkflowRun({ owner, repo, run_id: context.runId });
-            const { data } = await github.rest.actions.listWorkflowRuns({ owner, repo, workflow_id: 'release.yml', branch: 'release/0.7.0-beta.11', per_page: 100 });
+            const { data } = await github.rest.actions.listWorkflowRuns({ owner, repo, workflow_id: 'release.yml', branch, per_page: 100 });
             for (const run of data.workflow_runs) {
               if (run.id === context.runId || Date.parse(run.created_at) >= Date.parse(current.created_at)) continue;
               if (!['queued', 'in_progress', 'pending', 'waiting', 'requested'].includes(run.status)) continue;
@@ -37,10 +38,10 @@ jobs:
               catch (error) { if (error.status !== 409) throw error; }
             }
       - name: Drop a stale draft bound to another commit
-        if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/release/0.7.0-beta.11'
+        if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/heads/release/')
         uses: actions/github-script@v7
         env:
-          RELEASE_TAG: ${{ github.ref == 'refs/heads/release/0.7.0-beta.11' && 'v0.7.0-beta.11' || github.ref_name }}
+          TARGET_REF: ${{ github.ref_name }}
         with:
           script: |
             // The Tauri action reuses a draft it finds by tag but never updates its target
@@ -48,7 +49,8 @@ jobs:
             // block every later attempt. Remove only drafts bound to a different commit;
             // a published release is handled by the next step.
             const { owner, repo } = context.repo;
-            const tag = process.env.RELEASE_TAG;
+            const ref = process.env.TARGET_REF;
+            const tag = ref.startsWith('release/') ? `v${ref.slice('release/'.length)}` : ref;
             const releases = await github.paginate(github.rest.repos.listReleases, { owner, repo, per_page: 100 });
             for (const release of releases.filter(candidate => candidate.tag_name === tag && candidate.draft)) {
               const target = String(release.target_commitish || '').toLowerCase();
@@ -57,14 +59,15 @@ jobs:
               await github.rest.repos.deleteRelease({ owner, repo, release_id: release.id });
             }
       - name: Reject published release or mismatched existing tag
-        if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/release/0.7.0-beta.11'
+        if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/heads/release/')
         uses: actions/github-script@v7
         env:
-          RELEASE_TAG: ${{ github.ref == 'refs/heads/release/0.7.0-beta.11' && 'v0.7.0-beta.11' || github.ref_name }}
+          TARGET_REF: ${{ github.ref_name }}
         with:
           script: |
             const { owner, repo } = context.repo;
-            const tag = process.env.RELEASE_TAG;
+            const ref = process.env.TARGET_REF;
+            const tag = ref.startsWith('release/') ? `v${ref.slice('release/'.length)}` : ref;
             try {
               const { data: release } = await github.rest.repos.getReleaseByTag({ owner, repo, tag });
               if (!release.draft) throw new Error(`Release ${tag} is already published; refusing asset re-upload`);
@@ -110,8 +113,11 @@ jobs:
           packages = tomllib.loads((root / 'Cargo.lock').read_text())['package']
           local = [p for p in packages if p['name'] in ('aegis-core', 'aegis-app') and 'source' not in p]
           assert len(local) == 2 and all(p['version'] == version for p in local)
-          if os.environ['GITHUB_REF'] == 'refs/heads/release/0.7.0-beta.11':
-              assert version == '0.7.0-beta.11'
+          ref = os.environ['GITHUB_REF']
+          for prefix in ('refs/heads/release/', 'refs/tags/v'):
+              if ref.startswith(prefix):
+                  expected = ref[len(prefix):]
+                  assert version == expected, f'{ref} names {expected}, manifests say {version}'
           print('Consistent package version:', version)
       - name: Rust format check
         run: cargo fmt --all -- --check
@@ -150,33 +156,48 @@ jobs:
       # Tests already ran in `verify` on the same Windows image; the build job only packages.
       - run: npm ci
         working-directory: app
-      - name: Load beta release notes
+      - name: Load release notes
         id: notes
-        if: github.ref == 'refs/heads/release/0.7.0-beta.11' || github.ref == 'refs/tags/v0.7.0-beta.11'
+        if: startsWith(github.ref, 'refs/heads/release/') || startsWith(github.ref, 'refs/tags/v')
         shell: python
         run: |
-          import os, pathlib, uuid
-          body = pathlib.Path('docs/release-beta11.md').read_text(encoding='utf-8')
+          import os, pathlib, tomllib, uuid
+          version = tomllib.loads(pathlib.Path('Cargo.toml').read_text(encoding='utf-8'))['workspace']['package']['version']
+          # docs/release-beta11.md names the suffix only; docs/release-<full version>.md also works.
+          suffix = version.rsplit('-', 1)[-1].replace('.', '') if '-' in version else version
+          notes = next((path for path in (pathlib.Path(f'docs/release-{suffix}.md'),
+                                          pathlib.Path(f'docs/release-{version}.md')) if path.exists()), None)
+          body = notes.read_text(encoding='utf-8') if notes is not None else f'AEGIS {version}. See CHANGELOG.md.'
           delimiter = 'NOTES_' + uuid.uuid4().hex
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
               output.write('body<<' + delimiter + '\n' + body + '\n' + delimiter + '\n')
+      - name: Resolve release tag and name
+        id: tag
+        shell: python
+        run: |
+          import os, pathlib, tomllib
+          version = tomllib.loads(pathlib.Path('Cargo.toml').read_text(encoding='utf-8'))['workspace']['package']['version']
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write(f'tag=v{version}\n')
+              output.write(f'name=AEGIS {version}\n')
+              output.write(f'version={version}\n')
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           projectPath: app
           args: --bundles nsis
-          tagName: ${{ github.ref == 'refs/heads/release/0.7.0-beta.11' && 'v0.7.0-beta.11' || startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
-          releaseName: AEGIS ${{ (github.ref == 'refs/heads/release/0.7.0-beta.11' || github.ref == 'refs/tags/v0.7.0-beta.11') && '0.7.0-beta.11' || github.ref_name }}
+          tagName: ${{ steps.tag.outputs.tag }}
+          releaseName: ${{ steps.tag.outputs.name }}
           releaseBody: ${{ steps.notes.outputs.body }}
           releaseCommitish: ${{ github.sha }}
           # Keep the upload private until the installer check succeeds.
           releaseDraft: true
-          prerelease: ${{ contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
+          prerelease: ${{ contains(steps.tag.outputs.version, '-beta') || contains(steps.tag.outputs.version, '-alpha') }}
 
   publish:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/release/0.7.0-beta.11'
+    if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/heads/release/')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -184,11 +205,12 @@ jobs:
       - name: Verify all installers and publish release
         uses: actions/github-script@v7
         env:
-          RELEASE_TAG: ${{ github.ref == 'refs/heads/release/0.7.0-beta.11' && 'v0.7.0-beta.11' || github.ref_name }}
+          TARGET_REF: ${{ github.ref_name }}
         with:
           script: |
             const { owner, repo } = context.repo;
-            const tag = process.env.RELEASE_TAG;
+            const ref = process.env.TARGET_REF;
+            const tag = ref.startsWith('release/') ? `v${ref.slice('release/'.length)}` : ref;
             // A draft release has no git tag yet: GitHub creates the tag only when the draft is
             // published, and getReleaseByTag() cannot see drafts at all. Looking the release up
             // by tag therefore returned 404 on our own draft, so nothing could ever be published.
@@ -209,7 +231,7 @@ jobs:
             if (!assets.some(asset => asset.name.toLowerCase().endsWith('-setup.exe') && asset.size > 0 && asset.state === 'uploaded')) {
               throw new Error('Missing nonempty uploaded Windows -setup.exe installer; release remains draft');
             }
-            const prerelease = tag === 'v0.7.0-beta.11' || tag.includes('-beta') || tag.includes('-alpha');
+            const prerelease = tag.includes('-beta') || tag.includes('-alpha');
             const { data: published } = await github.rest.repos.updateRelease({ owner, repo, release_id: release.id, draft: false, prerelease });
             if (published.draft || published.prerelease !== prerelease) throw new Error('Release publication state verification failed');
             core.summary.addHeading('Verified release installers');
