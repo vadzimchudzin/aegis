@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- The backtest table header "Entry" now translates to Russian ("Вход") and Kazakh ("Кіру"); it stayed English in both languages.
+- New `app/tests/i18n.test.cjs` covers the translation stores that had none: Russian/Kazakh key-set parity and blank values in `i18n-dict.js`, the local model panel's own dictionary and the densities word table; completeness of the `structural-i18n.js` triples; no silent override of a shared translation by the structural overlay; every string literal handed to `t()` in `app.js`, `bounce.js`, `structural.js`, `local-ai.js` and `densities.js` having a translation; and `i18n-strings.json` staying a subset of the dictionary. A UI string added without a translation now fails `npm test`.
+
 ## 0.7.0-beta.11 — Journal rotation
 
 - Fix `journal append would exceed the 32 MiB limit`: the observer journal rotates at 24 MiB into a verified zstd archive instead of refusing records.
