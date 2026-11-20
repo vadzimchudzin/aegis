@@ -476,13 +476,16 @@ fn candidate_from(report: &ScoutReport, snapshot: &Snapshot) -> Option<Candidate
         return None;
     }
     let entry = if side == "long" { snapshot.ask } else { snapshot.bid };
+    // The stop has to clear the far side of the spread, not just the entry price: a long stops at
+    // the bid, so a stop between bid and ask is already breached by the spread on the first tick.
+    let breach = if side == "long" { snapshot.bid } else { snapshot.ask };
     let distance_pct = if side == "long" {
-        if stop >= entry {
+        if stop >= breach {
             return None;
         }
         (entry - stop) / entry * 100.0
     } else {
-        if stop <= entry {
+        if stop <= breach {
             return None;
         }
         (stop - entry) / entry * 100.0
@@ -628,9 +631,10 @@ mod tests {
     fn an_implausible_or_missing_stop_is_refused() {
         let snap = snapshot(100.5, 100.0);
         assert!(candidate_from(&scout("long", 70.0, None), &snap).is_none());
-        // Four cents on a hundred-dollar entry is inside the spread, not an invalidation level.
-        assert!(candidate_from(&scout("long", 70.0, Some(99.996)), &snap).is_none());
-        // Twenty percent away is a guess, not a level.
+        // A stop inside the bid/ask spread is breached by the spread itself on the first tick.
+        assert!(candidate_from(&scout("long", 70.0, Some(100.2)), &snap).is_none());
+        assert!(candidate_from(&scout("short", 70.0, Some(100.3)), &snap).is_none());
+        // Twenty percent away is a guess, not an invalidation level.
         assert!(candidate_from(&scout("long", 70.0, Some(80.0)), &snap).is_none());
     }
 

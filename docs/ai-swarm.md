@@ -27,10 +27,11 @@ exposure.
    journal, risk limits). A lens is a narrow question — "is the series making progress in
    one direction" — not "find a setup", because a broad question invites invention.
 2. **Filtering.** A report is dropped unless `setup` is `long` or `short`, `confidence`
-   is within 0…100, and `stop` is a real invalidation level: strictly on the loss side of
-   the entry, at least 0.01% and at most 5% away. Entry is never taken from the model —
-   it is the current ask for a long and the current bid for a short, so a scout cannot
-   invent a better price.
+   is within 0…100, and `stop` is a real invalidation level: it must clear the far side of
+   the spread (a long stops at the bid, a short at the ask), or the spread alone would
+   breach it on the first tick. Distance from entry must also be 0.01%…5%. Entry is never
+   taken from the model — it is the current ask for a long and the current bid for a short,
+   so a scout cannot invent a better price.
 3. **Candidates.** Proposals with the same side and a stop within 0.05% count as the same
    setup: they merge and record how many scouts back them.
 4. **Quorum.** `swarm_quorum` supporters are required before the panel sees a candidate.
