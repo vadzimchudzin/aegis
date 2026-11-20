@@ -6,6 +6,7 @@ use std::{
 
 use aegis_core::{
     ai::{self, AiSettings, Decision, PaperEngine, PaperState, Snapshot},
+    ai_swarm,
     BrokerId, Timeframe,
 };
 use serde::{Deserialize, Serialize};
@@ -337,6 +338,34 @@ async fn cloud_reserve(s: &AiSettings) -> Result<f64, String> {
     Ok((65536.0 * price("prompt")? + 1024.0 * price("completion")? + price("request")?) * 1.2)
 }
 
+/// How many model requests one round can issue. The cloud reservation has to cover the whole
+/// round, otherwise a swarm would pass the budget check and then overspend it.
+fn round_requests(settings: &AiSettings) -> usize {
+    if settings.swarm_scouts >= 2 {
+        settings.swarm_scouts.min(ai_swarm::MAX_SCOUTS)
+            + settings.swarm_voters.clamp(1, ai_swarm::MAX_VOTERS)
+    } else {
+        1
+    }
+}
+
+/// One decision round: the swarm when it is enabled, the single request otherwise.
+async fn round_decision(
+    settings: &AiSettings,
+    snapshot: &Snapshot,
+    paper: &PaperState,
+    key: Option<&str>,
+    cloud: bool,
+) -> Result<(Decision, Option<f64>), String> {
+    if settings.swarm_scouts >= 2 {
+        ai_swarm::request_swarm_decision(settings, snapshot, paper, key, cloud)
+            .await
+            .map(|result| (result.decision, result.cost))
+    } else {
+        ai::request_decision(settings, snapshot, paper, key, cloud).await
+    }
+}
+
 async fn cancelable_request(
     state: &AppState,
     epoch: u64,
@@ -350,7 +379,7 @@ async fn cancelable_request(
         return Err(CANCELLED_BEFORE_SEND.into());
     }
     tokio::select! {
-        result=ai::request_decision(settings,snapshot,paper,key,cloud)=>result,
+        result=round_decision(settings,snapshot,paper,key,cloud)=>result,
         _=async {loop {tokio::time::sleep(Duration::from_millis(100)).await;
             if state.ai.epoch.load(Ordering::SeqCst)!=epoch {break;}
         }}=>Err(if cloud {
@@ -410,7 +439,9 @@ async fn step_inner(state: &AppState, broker: BrokerId, cloud_only: bool, epoch:
     };
     if matches!(answer, Decision::Consult { .. }) {
         let key = state.settings.lock().await.ai_key().ok_or("Введите ключ OpenRouter")?;
-        let reserve = cloud_reserve(&s).await?;
+        // A swarm round spends one request per scout and per voter, so the reservation covers the
+        // whole round instead of a single call.
+        let reserve = cloud_reserve(&s).await? * round_requests(&s) as f64;
         let (reserve_day, reserve_month) = {
             let mut r = state.ai.inner.lock().await;
             if state.ai.epoch.load(Ordering::SeqCst) != epoch {

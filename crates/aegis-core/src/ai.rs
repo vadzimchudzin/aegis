@@ -46,6 +46,17 @@ pub struct AiSettings {
     pub api_monthly_budget_usd: f64,
     #[serde(default = "default_cloud_requests")]
     pub max_cloud_requests_per_day: u32,
+    /// Scouts in the screening swarm; 0 keeps the single-request path.
+    #[serde(default)]
+    pub swarm_scouts: usize,
+    #[serde(default = "default_swarm_voters")]
+    pub swarm_voters: usize,
+    #[serde(default = "default_swarm_quorum")]
+    pub swarm_quorum: usize,
+    #[serde(default = "default_swarm_threshold")]
+    pub swarm_vote_threshold: usize,
+    #[serde(default = "default_swarm_confidence")]
+    pub swarm_min_confidence: f64,
 }
 
 fn default_local_url() -> String {
@@ -87,6 +98,18 @@ fn default_monthly_budget() -> f64 {
 fn default_cloud_requests() -> u32 {
     10
 }
+fn default_swarm_voters() -> usize {
+    3
+}
+fn default_swarm_quorum() -> usize {
+    2
+}
+fn default_swarm_threshold() -> usize {
+    2
+}
+fn default_swarm_confidence() -> f64 {
+    55.0
+}
 
 impl Default for AiSettings {
     fn default() -> Self {
@@ -105,6 +128,11 @@ impl Default for AiSettings {
             api_daily_budget_usd: default_daily_budget(),
             api_monthly_budget_usd: default_monthly_budget(),
             max_cloud_requests_per_day: default_cloud_requests(),
+            swarm_scouts: 0,
+            swarm_voters: default_swarm_voters(),
+            swarm_quorum: default_swarm_quorum(),
+            swarm_vote_threshold: default_swarm_threshold(),
+            swarm_min_confidence: default_swarm_confidence(),
         }
     }
 }
@@ -146,6 +174,32 @@ impl AiSettings {
         }
         if self.preprompt.len() > 10_000 {
             return Err("preprompt must not exceed 10000 bytes".into());
+        }
+        if self.swarm_scouts > crate::ai_swarm::MAX_SCOUTS {
+            return Err(format!(
+                "swarm_scouts must not exceed {}",
+                crate::ai_swarm::MAX_SCOUTS
+            ));
+        }
+        if self.swarm_scouts >= 2 {
+            if self.swarm_voters == 0 || self.swarm_voters > crate::ai_swarm::MAX_VOTERS {
+                return Err(format!(
+                    "swarm_voters must be between 1 and {}",
+                    crate::ai_swarm::MAX_VOTERS
+                ));
+            }
+            if self.swarm_quorum == 0 || self.swarm_quorum > self.swarm_scouts {
+                return Err("swarm_quorum must be between 1 and swarm_scouts".into());
+            }
+            if self.swarm_vote_threshold == 0 || self.swarm_vote_threshold > self.swarm_voters {
+                return Err("swarm_vote_threshold must be between 1 and swarm_voters".into());
+            }
+            if !self.swarm_min_confidence.is_finite()
+                || self.swarm_min_confidence < 0.0
+                || self.swarm_min_confidence > 100.0
+            {
+                return Err("swarm_min_confidence must be between 0 and 100".into());
+            }
         }
         strategy_prompt(&self.strategy)?;
         validate_local_url(&self.local_url)?;
@@ -685,10 +739,10 @@ fn current_risk(p: &PaperPosition) -> f64 {
     }
     .max(0.0)
 }
-fn current_risk_total(state: &PaperState) -> f64 {
+pub(crate) fn current_risk_total(state: &PaperState) -> f64 {
     state.positions.iter().map(current_risk).sum()
 }
-fn position_notional_total(state: &PaperState, snapshot: Option<&Snapshot>) -> f64 {
+pub(crate) fn position_notional_total(state: &PaperState, snapshot: Option<&Snapshot>) -> f64 {
     state
         .positions
         .iter()
@@ -786,12 +840,31 @@ pub async fn request_decision(
     if cloud && api_key.map(str::trim).filter(|s| !s.is_empty()).is_none() {
         return Err("cloud API key is required".into());
     }
-    let endpoint = if cloud { CLOUD_URL } else { settings.local_url.as_str() };
     let model = if cloud {
         &settings.cloud_model
     } else {
         &settings.local_model
     };
+    let body = request_body(settings, snapshot, state, model, !cloud)?;
+    let (text, cost) = post_chat(settings, body, api_key, cloud).await?;
+    let decision: Decision =
+        serde_json::from_str(&text).map_err(|_| "AI decision is not valid strict decision JSON".to_string())?;
+    Ok((decision, cost))
+}
+
+/// One chat-completion round trip under the shared network policy: no redirects, no proxy for a
+/// local model, bounded response size. Every model caller in the crate goes through here, so the
+/// swarm and the single-request path cannot drift apart on transport rules.
+pub(crate) async fn post_chat(
+    settings: &AiSettings,
+    body: Vec<u8>,
+    api_key: Option<&str>,
+    cloud: bool,
+) -> Result<(String, Option<f64>), String> {
+    if cloud && api_key.map(str::trim).filter(|s| !s.is_empty()).is_none() {
+        return Err("cloud API key is required".into());
+    }
+    let endpoint = if cloud { CLOUD_URL } else { settings.local_url.as_str() };
     let mut builder = reqwest::Client::builder()
         .timeout(Duration::from_secs(120))
         .redirect(reqwest::redirect::Policy::none());
@@ -815,7 +888,6 @@ pub async fn request_decision(
     let client = builder
         .build()
         .map_err(|_| "failed to initialize AI HTTP client".to_string())?;
-    let body = request_body(settings, snapshot, state, model, !cloud)?;
     let mut request = client
         .post(endpoint)
         .header(header::CONTENT_TYPE, "application/json")
@@ -837,14 +909,13 @@ pub async fn request_decision(
     let text = body
         .pointer("/choices/0/message/content")
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| "AI response has no decision content".to_string())?;
-    let decision: Decision =
-        serde_json::from_str(text).map_err(|_| "AI decision is not valid strict decision JSON".to_string())?;
+        .ok_or_else(|| "AI response has no decision content".to_string())?
+        .to_owned();
     let cost = body
         .pointer("/usage/cost")
         .and_then(serde_json::Value::as_f64)
         .filter(|v| v.is_finite() && *v >= 0.0);
-    Ok((decision, cost))
+    Ok((text, cost))
 }
 
 fn request_body(
@@ -861,6 +932,16 @@ fn request_body(
         settings.preprompt,
         if local { "" } else { "Do not return consult; no further AI consultation is available.\n" }
     );
+    chat_payload(model, &system, market_context(settings, snapshot, state), local)
+}
+
+/// Market evidence shared by every request shape: the trimmed journal, the quote and candles, and
+/// the paper limits the model must respect.
+pub(crate) fn market_context(
+    settings: &AiSettings,
+    snapshot: &Snapshot,
+    state: &PaperState,
+) -> serde_json::Value {
     let mut state = state.clone();
     state.journal = state
         .journal
@@ -877,7 +958,16 @@ fn request_body(
         "max_positions": settings.max_positions,
         "daily_loss_limit": settings.daily_loss_limit,
     });
-    let user = serde_json::json!({ "snapshot": snapshot, "paper_state": state, "risk_limits": risk_limits });
+    serde_json::json!({ "snapshot": snapshot, "paper_state": state, "risk_limits": risk_limits })
+}
+
+/// One chat-completion request body, capped so an oversized snapshot is refused before sending.
+pub(crate) fn chat_payload(
+    model: &str,
+    system: &str,
+    user: serde_json::Value,
+    local: bool,
+) -> Result<Vec<u8>, String> {
     let mut payload = serde_json::json!({
         "model": model,
         "messages": [{"role":"system","content":system},{"role":"user","content":user.to_string()}],

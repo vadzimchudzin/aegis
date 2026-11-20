@@ -4,6 +4,7 @@
 pub mod ai;
 pub mod ai_memory;
 pub mod ai_provider;
+pub mod ai_swarm;
 pub mod bounce;
 pub mod broker;
 pub mod checks;
