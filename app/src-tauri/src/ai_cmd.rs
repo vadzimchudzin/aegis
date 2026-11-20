@@ -6,8 +6,7 @@ use std::{
 
 use aegis_core::{
     ai::{self, AiSettings, Decision, PaperEngine, PaperState, Snapshot},
-    ai_swarm,
-    BrokerId, Timeframe,
+    ai_swarm, BrokerId, Timeframe,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -342,8 +341,7 @@ async fn cloud_reserve(s: &AiSettings) -> Result<f64, String> {
 /// round, otherwise a swarm would pass the budget check and then overspend it.
 fn round_requests(settings: &AiSettings) -> usize {
     if settings.swarm_scouts >= 2 {
-        settings.swarm_scouts.min(ai_swarm::MAX_SCOUTS)
-            + settings.swarm_voters.clamp(1, ai_swarm::MAX_VOTERS)
+        settings.swarm_scouts.min(ai_swarm::MAX_SCOUTS) + settings.swarm_voters.clamp(1, ai_swarm::MAX_VOTERS)
     } else {
         1
     }

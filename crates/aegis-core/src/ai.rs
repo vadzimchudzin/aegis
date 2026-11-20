@@ -176,10 +176,7 @@ impl AiSettings {
             return Err("preprompt must not exceed 10000 bytes".into());
         }
         if self.swarm_scouts > crate::ai_swarm::MAX_SCOUTS {
-            return Err(format!(
-                "swarm_scouts must not exceed {}",
-                crate::ai_swarm::MAX_SCOUTS
-            ));
+            return Err(format!("swarm_scouts must not exceed {}", crate::ai_swarm::MAX_SCOUTS));
         }
         if self.swarm_scouts >= 2 {
             if self.swarm_voters == 0 || self.swarm_voters > crate::ai_swarm::MAX_VOTERS {
@@ -937,11 +934,7 @@ fn request_body(
 
 /// Market evidence shared by every request shape: the trimmed journal, the quote and candles, and
 /// the paper limits the model must respect.
-pub(crate) fn market_context(
-    settings: &AiSettings,
-    snapshot: &Snapshot,
-    state: &PaperState,
-) -> serde_json::Value {
+pub(crate) fn market_context(settings: &AiSettings, snapshot: &Snapshot, state: &PaperState) -> serde_json::Value {
     let mut state = state.clone();
     state.journal = state
         .journal
@@ -962,12 +955,7 @@ pub(crate) fn market_context(
 }
 
 /// One chat-completion request body, capped so an oversized snapshot is refused before sending.
-pub(crate) fn chat_payload(
-    model: &str,
-    system: &str,
-    user: serde_json::Value,
-    local: bool,
-) -> Result<Vec<u8>, String> {
+pub(crate) fn chat_payload(model: &str, system: &str, user: serde_json::Value, local: bool) -> Result<Vec<u8>, String> {
     let mut payload = serde_json::json!({
         "model": model,
         "messages": [{"role":"system","content":system},{"role":"user","content":user.to_string()}],

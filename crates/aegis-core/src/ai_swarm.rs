@@ -8,8 +8,8 @@
 //! policy (no redirects, no proxy for a local model, bounded responses) as the single-shot path.
 
 use crate::ai::{
-    chat_payload, current_risk_total, market_context, position_notional_total, post_chat,
-    AiSettings, Decision, PaperState, Snapshot,
+    chat_payload, current_risk_total, market_context, position_notional_total, post_chat, AiSettings, Decision,
+    PaperState, Snapshot,
 };
 use serde::Deserialize;
 
@@ -231,32 +231,75 @@ pub async fn request_swarm_decision(
 
     let Some(winner) = pick_winner(&counts) else {
         let reason = format!("swarm: panel split, {voters_run} of {voters} votes counted");
-        return Ok(stand_down(cloud, snapshot.id, reason, spend, scouts, failed, candidates.len(), 0));
+        return Ok(stand_down(
+            cloud,
+            snapshot.id,
+            reason,
+            spend,
+            scouts,
+            failed,
+            candidates.len(),
+            0,
+        ));
     };
     let votes = counts[winner];
     let mean_confidence = confidence[winner] / votes as f64;
     let threshold = settings.swarm_vote_threshold.clamp(1, voters);
     if votes < threshold {
-        let reason = format!("swarm: candidate {} got {votes} of {voters} votes; {threshold} required", LABELS[winner]);
-        return Ok(stand_down(cloud, snapshot.id, reason, spend, scouts, failed, candidates.len(), votes));
+        let reason = format!(
+            "swarm: candidate {} got {votes} of {voters} votes; {threshold} required",
+            LABELS[winner]
+        );
+        return Ok(stand_down(
+            cloud,
+            snapshot.id,
+            reason,
+            spend,
+            scouts,
+            failed,
+            candidates.len(),
+            votes,
+        ));
     }
     if mean_confidence < settings.swarm_min_confidence {
-        let reason = format!("swarm: candidate {} won on {mean_confidence:.0}% confidence", LABELS[winner]);
-        return Ok(stand_down(cloud, snapshot.id, reason, spend, scouts, failed, candidates.len(), votes));
+        let reason = format!(
+            "swarm: candidate {} won on {mean_confidence:.0}% confidence",
+            LABELS[winner]
+        );
+        return Ok(stand_down(
+            cloud,
+            snapshot.id,
+            reason,
+            spend,
+            scouts,
+            failed,
+            candidates.len(),
+            votes,
+        ));
     }
 
     let winner_candidate = &candidates[winner];
     let sized = size_quantity(settings, snapshot, state, winner_candidate.side, winner_candidate.stop);
     let Some(quantity) = sized else {
-        let reason = format!("swarm: candidate {} won but the risk budget is exhausted", LABELS[winner]);
-        return Ok(stand_down(cloud, snapshot.id, reason, spend, scouts, failed, candidates.len(), votes));
+        let reason = format!(
+            "swarm: candidate {} won but the risk budget is exhausted",
+            LABELS[winner]
+        );
+        return Ok(stand_down(
+            cloud,
+            snapshot.id,
+            reason,
+            spend,
+            scouts,
+            failed,
+            candidates.len(),
+            votes,
+        ));
     };
 
     let reason = format!(
         "swarm: {votes}/{voters} voters backed {} ({:.0}% mean confidence): {}",
-        LABELS[winner],
-        mean_confidence,
-        winner_candidate.thesis
+        LABELS[winner], mean_confidence, winner_candidate.thesis
     );
     Ok(SwarmResult {
         decision: Decision::Open {
@@ -309,15 +352,9 @@ fn stand_down(
     // A local round that finds nothing is the existing signal to escalate to the cloud model; a
     // cloud round cannot escalate further and simply stands aside.
     let decision = if cloud {
-        Decision::Wait {
-            snapshot_id,
-            reason,
-        }
+        Decision::Wait { snapshot_id, reason }
     } else {
-        Decision::Consult {
-            snapshot_id,
-            reason,
-        }
+        Decision::Consult { snapshot_id, reason }
     };
     SwarmResult {
         decision,
@@ -330,11 +367,7 @@ fn stand_down(
     }
 }
 
-async fn scout_once(
-    round: &Round,
-    name: &str,
-    brief: &str,
-) -> Result<(ScoutReport, Option<f64>), String> {
+async fn scout_once(round: &Round, name: &str, brief: &str) -> Result<(ScoutReport, Option<f64>), String> {
     let system = scout_prompt(name, brief, round.cloud);
     let mut user = market_context(&round.settings, &round.snapshot, &round.state);
     user["swarm"] = serde_json::json!({
@@ -484,11 +517,7 @@ fn merge_candidate(candidates: &mut Vec<Candidate>, incoming: Candidate) {
 
 fn apply_quorum(candidates: &mut Vec<Candidate>, quorum: usize) {
     candidates.retain(|candidate| candidate.support >= quorum);
-    candidates.sort_by(|a, b| {
-        b.support
-            .cmp(&a.support)
-            .then(b.confidence.total_cmp(&a.confidence))
-    });
+    candidates.sort_by(|a, b| b.support.cmp(&a.support).then(b.confidence.total_cmp(&a.confidence)));
 }
 
 fn vote_index(vote: &str, candidates: usize) -> Option<usize> {
@@ -513,13 +542,7 @@ fn pick_winner(counts: &[usize]) -> Option<usize> {
 
 /// Size the position from the settings the risk gates use, so a swarm entry arrives already legal
 /// instead of being rejected by the engine for the size its own scouts implied.
-fn size_quantity(
-    settings: &AiSettings,
-    snapshot: &Snapshot,
-    state: &PaperState,
-    side: &str,
-    stop: f64,
-) -> Option<f64> {
+fn size_quantity(settings: &AiSettings, snapshot: &Snapshot, state: &PaperState, side: &str, stop: f64) -> Option<f64> {
     let entry = if side == "long" { snapshot.ask } else { snapshot.bid };
     if !entry.is_finite() || entry <= 0.0 {
         return None;
@@ -534,8 +557,7 @@ fn size_quantity(
     }
     let risk_budget = equity * settings.max_risk_pct / 100.0 - current_risk_total(state);
     let leverage_room = equity * settings.max_leverage - position_notional_total(state, Some(snapshot));
-    if !risk_budget.is_finite() || !leverage_room.is_finite() || risk_budget <= 0.0 || leverage_room <= 0.0
-    {
+    if !risk_budget.is_finite() || !leverage_room.is_finite() || risk_budget <= 0.0 || leverage_room <= 0.0 {
         return None;
     }
     let quantity = (risk_budget / per_unit).min(leverage_room / entry);
@@ -548,13 +570,16 @@ fn parse_json<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, String> {
         return Ok(value);
     }
     // Some endpoints wrap the object in a markdown fence despite the instruction against it.
-    let start = trimmed.find('{').ok_or_else(|| "swarm reply has no JSON object".to_string())?;
-    let end = trimmed.rfind('}').ok_or_else(|| "swarm reply has no JSON object".to_string())?;
+    let start = trimmed
+        .find('{')
+        .ok_or_else(|| "swarm reply has no JSON object".to_string())?;
+    let end = trimmed
+        .rfind('}')
+        .ok_or_else(|| "swarm reply has no JSON object".to_string())?;
     if end <= start {
         return Err("swarm reply has no JSON object".into());
     }
-    serde_json::from_str::<T>(&trimmed[start..=end])
-        .map_err(|_| "swarm reply is not valid strict JSON".to_string())
+    serde_json::from_str::<T>(&trimmed[start..=end]).map_err(|_| "swarm reply is not valid strict JSON".to_string())
 }
 
 fn truncate(text: &str, limit: usize) -> String {
@@ -634,8 +659,14 @@ mod tests {
     fn opposite_sides_stay_separate_candidates() {
         let snap = snapshot(100.5, 100.0);
         let mut candidates = Vec::new();
-        merge_candidate(&mut candidates, candidate_from(&scout("long", 70.0, Some(99.0)), &snap).unwrap());
-        merge_candidate(&mut candidates, candidate_from(&scout("short", 70.0, Some(101.0)), &snap).unwrap());
+        merge_candidate(
+            &mut candidates,
+            candidate_from(&scout("long", 70.0, Some(99.0)), &snap).unwrap(),
+        );
+        merge_candidate(
+            &mut candidates,
+            candidate_from(&scout("short", 70.0, Some(101.0)), &snap).unwrap(),
+        );
         assert_eq!(candidates.len(), 2);
     }
 
@@ -643,9 +674,18 @@ mod tests {
     fn quorum_drops_the_lonely_scout() {
         let snap = snapshot(100.5, 100.0);
         let mut candidates = Vec::new();
-        merge_candidate(&mut candidates, candidate_from(&scout("long", 70.0, Some(99.0)), &snap).unwrap());
-        merge_candidate(&mut candidates, candidate_from(&scout("short", 70.0, Some(101.0)), &snap).unwrap());
-        merge_candidate(&mut candidates, candidate_from(&scout("short", 65.0, Some(101.0)), &snap).unwrap());
+        merge_candidate(
+            &mut candidates,
+            candidate_from(&scout("long", 70.0, Some(99.0)), &snap).unwrap(),
+        );
+        merge_candidate(
+            &mut candidates,
+            candidate_from(&scout("short", 70.0, Some(101.0)), &snap).unwrap(),
+        );
+        merge_candidate(
+            &mut candidates,
+            candidate_from(&scout("short", 65.0, Some(101.0)), &snap).unwrap(),
+        );
         apply_quorum(&mut candidates, 2);
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].side, "short");
@@ -714,27 +754,9 @@ mod tests {
 
     #[test]
     fn a_cloud_round_stands_aside_instead_of_escalating() {
-        let local = stand_down(
-            false,
-            7,
-            "no candidate".into(),
-            Costs::default(),
-            3,
-            0,
-            0,
-            0,
-        );
+        let local = stand_down(false, 7, "no candidate".into(), Costs::default(), 3, 0, 0, 0);
         assert!(matches!(local.decision, Decision::Consult { .. }));
-        let cloud = stand_down(
-            true,
-            7,
-            "no candidate".into(),
-            Costs::default(),
-            3,
-            0,
-            0,
-            0,
-        );
+        let cloud = stand_down(true, 7, "no candidate".into(), Costs::default(), 3, 0, 0, 0);
         assert!(matches!(cloud.decision, Decision::Wait { .. }));
     }
 
