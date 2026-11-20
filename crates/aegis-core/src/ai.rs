@@ -228,7 +228,7 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
-    fn validate(&self) -> Result<(), String> {
+    pub(crate) fn validate(&self) -> Result<(), String> {
         if self.broker.trim().is_empty() || self.symbol.trim().is_empty() {
             return Err("snapshot broker and symbol must not be empty".into());
         }
