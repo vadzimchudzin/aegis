@@ -17,6 +17,11 @@
     { id: "api_daily_budget_usd", label: "Дневной лимит API, USD", type: "number", min: "0", step: "any" },
     { id: "api_monthly_budget_usd", label: "Месячный лимит API, USD", type: "number", min: "0", step: "any" },
     { id: "max_cloud_requests_per_day", label: "Максимум облачных запросов в день", type: "number", min: "0", step: "1" },
+    { id: "swarm_scouts", label: "Скаутов в рое (0 — одиночный запрос)", type: "number", min: "0", max: "6", step: "1", fallback: 0 },
+    { id: "swarm_voters", label: "Голосующих в панели", type: "number", min: "1", max: "5", step: "1", fallback: 3 },
+    { id: "swarm_quorum", label: "Сколько скаутов должны подтвердить сетап", type: "number", min: "1", max: "6", step: "1", fallback: 2 },
+    { id: "swarm_vote_threshold", label: "Голосов, необходимых решению", type: "number", min: "1", max: "5", step: "1", fallback: 2 },
+    { id: "swarm_min_confidence", label: "Минимальная средняя уверенность панели, %", type: "number", min: "0", max: "100", step: "any", fallback: 55 },
   ];
   const B = { status: null, loaded: false, loading: false, busy: false, notice: "", error: "" };
   let pollTimer = null;

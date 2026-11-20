@@ -1,7 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.7.0-beta.12 — Screening swarm
 
+- Optional screening swarm for the AI path: several scouts read the same candles through different lenses, their proposals merge into candidates, and a panel of voters with distinct mandates decides whether one candidate is worth acting on. `swarm_scouts` defaults to `0`, which keeps the single-request path unchanged. See `docs/ai-swarm.md`.
+- Position size for a swarm entry is derived from `max_risk_pct` and `max_leverage` against current exposure, so it reaches the risk gates already legal instead of being rejected for its size.
+- The cloud budget reservation covers the whole swarm round (scouts plus voters); previously a multi-request round would pass the pre-flight check and overspend it.
+- Model transport moved into `ai::post_chat`, shared by the swarm and the single-request path.
 - The backtest table header "Entry" now translates to Russian ("Вход") and Kazakh ("Кіру"); it stayed English in both languages.
 - New `app/tests/i18n.test.cjs` covers the translation stores that had none: Russian/Kazakh key-set parity and blank values in `i18n-dict.js`, the local model panel's own dictionary and the densities word table; completeness of the `structural-i18n.js` triples; no silent override of a shared translation by the structural overlay; every string literal handed to `t()` in `app.js`, `bounce.js`, `structural.js`, `local-ai.js` and `densities.js` having a translation; and `i18n-strings.json` staying a subset of the dictionary. A UI string added without a translation now fails `npm test`.
 

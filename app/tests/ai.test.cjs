@@ -140,3 +140,14 @@ test("local URL hint matches the backend chat-completions endpoint contract", as
   f.api.render(f.root); await flush();
   assert.match(f.nodes.get("ai-settings").innerHTML, /name="local_url"[^>]*placeholder="http:\/\/127\.0\.0\.1:11434\/v1\/chat\/completions"/);
 });
+
+test("screening swarm controls are rendered with a safe disabled default", async () => {
+  const f = fixture();
+  f.api.render(f.root); await flush();
+  const html = f.nodes.get("ai-settings").innerHTML;
+  for (const field of ["swarm_scouts", "swarm_voters", "swarm_quorum", "swarm_vote_threshold", "swarm_min_confidence"]) {
+    assert.match(html, new RegExp(`name="${field}"`), `${field} must be editable from the panel`);
+  }
+  // Zero scouts is the single-request path, so an upgraded install keeps its old behaviour.
+  assert.match(html, /name="swarm_scouts"[^>]*value="0"/);
+});
