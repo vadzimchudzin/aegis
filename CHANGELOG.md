@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.0-beta.12 — Screening swarm
 
 - Optional screening swarm for the AI path: several scouts read the same candles through different lenses, their proposals merge into candidates, and a panel of voters with distinct mandates decides whether one candidate is worth acting on. `swarm_scouts` defaults to `0`, which keeps the single-request path unchanged. See `docs/ai-swarm.md`.
 - Position size for a swarm entry is derived from `max_risk_pct` and `max_leverage` against current exposure, so it reaches the risk gates already legal instead of being rejected for its size.
